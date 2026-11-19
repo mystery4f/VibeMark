@@ -34,14 +34,24 @@ open or write (message on stderr).
 
 | Chord | Action |
 | --- | --- |
-| `Ctrl+S` | Save |
+| `Enter` | Continue a list item, or start a new block |
+| `Shift+Enter` | Line break inside the same block |
 | `Esc` | Commit the active block |
+| `Ctrl+S` | Save |
 | `Ctrl+P` | Toggle the full-screen preview |
-| `Ctrl+N` | New `untitled.md` in the working directory (workspace mode) |
-| `Ctrl+B` / `Ctrl+I` / `Ctrl+E` | Bold / italic / inline code around the selection |
+| `Ctrl+/` | Toggle source mode for the whole document |
+| `Ctrl+Shift+L` | Toggle the file tree |
+| `Ctrl+B` / `Ctrl+I` | Bold / italic around the selection |
+| ``Ctrl+Shift+` `` | Inline code around the selection |
+| `Alt+Shift+5` | Strikethrough around the selection |
 | `Ctrl+K` | Wrap the selection as a link |
-| `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Heading level 1 / 2 / 3 |
-| `Ctrl+Shift+8` / `Ctrl+Shift+9` / `Ctrl+Shift+\` | Bullet list / ordered list / blockquote |
+| `Ctrl+1` ... `Ctrl+6` | Heading level 1 ... 6 |
+| `Ctrl+0` | Back to a plain paragraph |
+| `Ctrl+Shift+K` | Toggle a fenced code block |
+| `Ctrl+Shift+Q` | Blockquote |
+| `Ctrl+Shift+[` / `Ctrl+Shift+]` | Ordered / bullet list |
+
+The chords follow Typora's defaults, so muscle memory carries over.
 
 ## Use it as git's editor
 

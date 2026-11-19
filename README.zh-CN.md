@@ -31,14 +31,24 @@ keel 的装饰既不能隐藏字符也不能改字宽，所以真 WYSIWYG 只能
 
 | 组合 | 作用 |
 | --- | --- |
-| `Ctrl+S` | 保存 |
+| `Enter` | 列表项内继续同一列表，否则另起一块 |
+| `Shift+Enter` | 在同一块内换行 |
 | `Esc` | 提交当前正在编辑的块 |
+| `Ctrl+S` | 保存 |
 | `Ctrl+P` | 全屏预览开关 |
-| `Ctrl+N` | 在工作目录里新建 `untitled.md`（仅工作目录模式） |
-| `Ctrl+B` / `Ctrl+I` / `Ctrl+E` | 选区加粗 / 斜体 / 行内代码 |
+| `Ctrl+/` | 整篇切到源码模式 |
+| `Ctrl+Shift+L` | 文件树开关 |
+| `Ctrl+B` / `Ctrl+I` | 选区加粗 / 斜体 |
+| ``Ctrl+Shift+` `` | 选区行内代码 |
+| `Alt+Shift+5` | 选区删除线 |
 | `Ctrl+K` | 选区包成链接 |
-| `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | 一级 / 二级 / 三级标题 |
-| `Ctrl+Shift+8` / `Ctrl+Shift+9` / `Ctrl+Shift+\` | 无序列表 / 有序列表 / 引用 |
+| `Ctrl+1` ... `Ctrl+6` | 一级 ... 六级标题 |
+| `Ctrl+0` | 变回普通段落 |
+| `Ctrl+Shift+K` | 围栏代码块开关 |
+| `Ctrl+Shift+Q` | 引用 |
+| `Ctrl+Shift+[` / `Ctrl+Shift+]` | 有序 / 无序列表 |
+
+键位沿用 Typora 默认，肌肉记忆可以直接带过来。
 
 ## 当作 git 编辑器
 

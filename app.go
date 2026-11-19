@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"image/color"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dyike/keel/ui/core"
 	"github.com/dyike/keel/ui/el"
@@ -32,6 +32,10 @@ const (
 	// lineHeight is one editor row in dp: kit.CodeEditor draws TextMd (13sp)
 	// at 1.5 line height.
 	lineHeight = 20
+	// blockIndent is the width kit.CodeEditor reserves for its gutter, so the
+	// rendered blocks start where the editor's text starts and switching blocks
+	// does not shift the text sideways.
+	blockIndent = 56
 	// saveDelay is how long typing rests before a working directory writes.
 	saveDelay = 300 * time.Millisecond
 )
@@ -65,6 +69,11 @@ type app struct {
 	blocks []mddoc.Block
 	docs   []*markdown.Doc
 
+	// lastValue is what the editor held after the previous change, so a bare
+	// newline can be told apart from pasted text or a programmatic SetValue.
+	lastValue string
+	splitting bool
+
 	active        int    // index of the block being edited, -1 when none
 	before, after string // the text before and after the active block
 
@@ -75,6 +84,8 @@ type app struct {
 	saveArmed   bool // a debounce timer is running
 	status      string
 	statusColor *color.NRGBA
+	treeHidden  bool // the sidebar is folded away
+	sourceMode  bool // the whole document is shown as one source block
 
 	ready bool
 }
@@ -148,6 +159,17 @@ func (a *app) load(content string) {
 	a.editor.Name(filepath.Base(a.path))
 	a.editor.SetValue("")
 	a.split(content)
+	if a.mode != modeSingle {
+		return
+	}
+	// git hands the editor a file and expects the next keystroke to land in it,
+	// so the first block is open for typing before any click. An empty message
+	// file gets one empty block to write into.
+	if len(a.blocks) == 0 {
+		a.appendBlock()
+		return
+	}
+	a.activate(0)
 }
 
 // split refills the block list and drops the rendered markdown of the old one.
@@ -172,37 +194,6 @@ func (a *app) loadDir() {
 	if first := firstFile(roots); first != "" {
 		a.open(first)
 	}
-}
-
-// newFile creates an untitled markdown file in the working directory and opens
-// it. Without this an empty directory is a dead end: there is no row to click
-// and no file to save into.
-func (a *app) newFile() {
-	if a.mode != modeWorkspace || a.dir == "" {
-		return
-	}
-	path := ""
-	for i := 1; i <= 100; i++ {
-		name := "untitled.md"
-		if i > 1 {
-			name = fmt.Sprintf("untitled-%d.md", i)
-		}
-		candidate := filepath.Join(a.dir, name)
-		if _, err := os.Stat(candidate); errors.Is(err, fs.ErrNotExist) {
-			path = candidate
-			break
-		}
-	}
-	if path == "" {
-		a.fail(userError("新建", "untitled.md", errors.New("文件名都被占用了")))
-		return
-	}
-	if err := workspace.Ensure(path); err != nil {
-		a.fail(userError("新建", filepath.Base(path), err))
-		return
-	}
-	a.loadDir()
-	a.open(path)
 }
 
 // open switches the window to the file the tree selected, saving pending edits
@@ -241,7 +232,8 @@ func (a *app) activate(i int) {
 	a.before, a.after = a.doc[:block.Start], a.doc[block.End:]
 	a.active = i
 	a.editor.Name(filepath.Base(a.path))
-	a.editor.SetValue(block.Text(a.doc))
+	a.lastValue = block.Text(a.doc)
+	a.editor.SetValue(a.lastValue)
 	a.editor.SetCursor(0, 0)
 	a.editor.Focus()
 	a.pending = true
@@ -283,8 +275,142 @@ func (a *app) appendBlock() {
 // changed runs on every editor change. Decorations wait for the next frame so a
 // burst of keystrokes costs one parse.
 func (a *app) changed(text string) {
+	if a.splitting {
+		a.lastValue = text
+		return
+	}
+	// Source mode edits the document as one block, so Enter stays a plain
+	// newline there instead of starting a new block.
+	if a.sourceMode {
+		a.lastValue = text
+		a.dirty = text != a.saved
+		a.pending = true
+		if a.mode == modeWorkspace {
+			a.scheduleSave()
+		}
+		return
+	}
+	if off, ok := newlineInsertion(a.lastValue, text); ok {
+		a.lastValue = text
+		a.splitAtCaret(off)
+		return
+	}
+	a.lastValue = text
 	full := a.text()
 	a.dirty = full != a.saved
+	a.pending = true
+	if a.mode == modeWorkspace {
+		a.scheduleSave()
+	}
+}
+
+// newlineInsertion reports whether next is prev with exactly one newline added,
+// and where the caret sits after it. Typing Enter must finish the line above and
+// start a new block instead of keeping the whole paragraph as source.
+func newlineInsertion(prev, next string) (int, bool) {
+	if len(next) != len(prev)+1 {
+		return 0, false
+	}
+	at := 0
+	for at < len(prev) && prev[at] == next[at] {
+		at++
+	}
+	if next[at] != '\n' || next[at+1:] != prev[at:] {
+		return 0, false
+	}
+	return at + 1, true
+}
+
+// splitAtCaret turns the text above off as its own block and keeps editing the
+// text below it, so everything already written renders again.
+func (a *app) splitAtCaret(off int) {
+	if a.active < 0 {
+		return
+	}
+	value := a.editor.Value()
+	if off <= 0 || off > len(value) {
+		return
+	}
+	head := strings.TrimRight(value[:off], "\n")
+	tail := value[off:]
+	line := head
+	if i := strings.LastIndexByte(head, '\n'); i >= 0 {
+		line = head[i+1:]
+	}
+	// A newline inside a fence is content, so the block keeps it as it is.
+	if mddoc.InsideFence(value, strings.Count(head, "\n")) {
+		a.touch(value)
+		return
+	}
+	// Enter in a list item continues the list the way Typora does.
+	if next, ok := mddoc.ListNext(line); ok {
+		a.continueList(value, off, line, next)
+		return
+	}
+	if tail == "" {
+		a.appendBlock()
+		return
+	}
+	gap := "\n\n"
+	if head == "" {
+		gap = ""
+	}
+	doc := a.before + head + gap + tail + a.after
+	start := len(a.before) + len(head) + len(gap)
+	a.splitting = true
+	a.doc = doc
+	a.split(doc)
+	a.splitting = false
+	index := mddoc.BlockAt(a.blocks, start)
+	if index < 0 {
+		index = len(a.blocks) - 1
+	}
+	a.activate(index)
+	a.dirty = a.text() != a.saved
+	a.pending = true
+	if a.mode == modeWorkspace {
+		a.scheduleSave()
+	}
+}
+
+// continueList keeps Enter inside a list: the new line carries the same marker
+// and the list stays one block. Enter on an item with no text leaves the list.
+func (a *app) continueList(value string, off int, line, next string) {
+	if next == "" {
+		start := off - 1 - len(line)
+		a.setValue(value[:start]+value[off:], mddoc.Pos{Line: strings.Count(value[:start], "\n")})
+		return
+	}
+	out := value[:off] + next + value[off:]
+	a.setValue(out, mddoc.Pos{Line: strings.Count(value[:off], "\n"), Col: utf8.RuneCountInString(next)})
+}
+
+// softBreak adds a line break inside the block instead of starting a new one,
+// the way Typora's Shift+Enter does.
+func (a *app) softBreak() {
+	if a.active < 0 || a.previewing || a.sourceMode {
+		return
+	}
+	line, col := a.editor.Cursor()
+	out, caret := mddoc.Insert(a.editor.Value(), mddoc.Pos{Line: line, Col: col}, "\n")
+	a.setValue(out, caret)
+}
+
+// setValue writes the editor for a change that must not look like a fresh Enter
+// to changed, so a continued list or a soft break stays in the same block.
+func (a *app) setValue(src string, caret mddoc.Pos) {
+	a.splitting = true
+	a.editor.SetValue(src)
+	a.editor.SetCursor(caret.Line, caret.Col)
+	a.changed(src)
+	a.splitting = false
+	a.touch(src)
+}
+
+// touch records an edit that keeps the block boundaries as they are.
+func (a *app) touch(value string) {
+	a.lastValue = value
+	a.dirty = a.text() != a.saved
 	a.pending = true
 	if a.mode == modeWorkspace {
 		a.scheduleSave()
@@ -366,15 +492,13 @@ func (a *app) Render(cx *el.Context) el.Element {
 
 	pal := theme.Current()
 	body := el.Div().Row().Grow().HFull()
-	if a.mode == modeWorkspace && !a.previewing && a.tree != nil && a.hasFiles {
+	if a.mode == modeWorkspace && !a.previewing && !a.treeHidden && a.tree != nil && a.hasFiles {
 		body.Child(el.Div().W(el.Dp(240)).HFull().Border(1, pal.Border).ScrollY().Child(a.tree.Render(cx)))
 	}
 	switch {
 	case a.mode == modeWorkspace && a.path == "":
-		body.Child(el.Div().Grow().HFull().P(24).Gap(8).Items(el.Start).Justify(el.Start).
-			Child(el.Text(emptyHint).TextColor(pal.Muted)).
-			Child(el.Div().P(8).OnClick(a.newFile).
-				Child(el.Text("点这里新建一篇，或者按 Ctrl+N").TextColor(pal.Primary))))
+		body.Child(el.Div().Grow().HFull().P(24).Items(el.Start).Justify(el.Start).
+			Child(el.Text(emptyHint).TextColor(pal.Muted)))
 	case a.previewing:
 		a.preview.SetSource(a.text())
 		body.Child(el.Div().Grow().HFull().ScrollY().P(24).Child(a.preview.Render(cx)))
@@ -418,11 +542,80 @@ func (a *app) column(cx *el.Context) el.Element {
 // blockView renders one untouched block as markdown inside a press target.
 func (a *app) blockView(cx *el.Context, i int, pal theme.Palette) el.Element {
 	block := a.blocks[i]
-	if a.docs[i] == nil {
-		a.docs[i] = markdown.New(block.Text(a.doc))
+	text := block.Text(a.doc)
+	press := el.Div().WFull().Pl(float32(blockIndent)).OnClick(func() { a.activate(i) })
+	if items, ok := taskItems(text); ok {
+		return press.Child(taskList(cx, items))
 	}
-	return el.Div().WFull().OnClick(func() { a.activate(i) }).
-		Child(a.docs[i].Render(cx))
+	if a.docs[i] == nil {
+		a.docs[i] = markdown.New(text)
+	}
+	return press.Child(a.docs[i].Render(cx))
+}
+
+// taskItem is one GFM task-list row read straight from the block source.
+type taskItem struct {
+	checked bool
+	indent  int
+	text    string
+}
+
+// taskItems reads a block that is nothing but a task list. The renderer keel
+// ships draws its checked marker with U+2611, which the bundled fonts do not
+// have, so a completed task loses its box; drawing the rows here keeps both
+// states visible.
+func taskItems(text string) ([]taskItem, bool) {
+	var items []taskItem
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		body := line[indent:]
+		if !strings.HasPrefix(body, "- [") && !strings.HasPrefix(body, "* [") {
+			return nil, false
+		}
+		if len(body) < 6 || body[4] != ']' {
+			return nil, false
+		}
+		state := body[3]
+		if state != ' ' && state != 'x' && state != 'X' {
+			return nil, false
+		}
+		items = append(items, taskItem{
+			checked: state != ' ',
+			indent:  indent,
+			text:    strings.TrimPrefix(body[6:], " "),
+		})
+	}
+	return items, len(items) > 0
+}
+
+// taskList draws the rows taskItems read, keeping each row's own markdown.
+func taskList(cx *el.Context, items []taskItem) el.Element {
+	list := el.Div().Col().WFull().Gap(6)
+	for _, item := range items {
+		row := el.Div().Row().WFull().Gap(6).Items(el.Start)
+		if item.indent > 0 {
+			row.Pl(float32(item.indent * 8))
+		}
+		row.Child(el.Div().W(el.Dp(16)).NoShrink().Items(el.End).Child(taskBox(item.checked)))
+		row.Child(markdown.New(item.text).Render(cx))
+		list.Child(row)
+	}
+	return list
+}
+
+// taskBox is the checkbox in front of a task row. It uses the check mark glyph
+// because the bundled fonts have U+2713 but not U+2611.
+func taskBox(checked bool) el.Element {
+	pal := theme.Current()
+	box := el.Div().W(el.Dp(14)).H(el.Dp(14)).Border(1, pal.Muted).
+		Items(el.Center).Justify(el.Center)
+	if !checked {
+		return box
+	}
+	return box.Border(1, pal.Primary).Child(el.Text("✓").TextSize(10).TextColor(pal.Primary))
 }
 
 // activeEditor draws the block under the caret at its own height.
@@ -466,21 +659,30 @@ func (a *app) stateText() string {
 
 // shortcuts returns the key bindings the window registers.
 func (a *app) shortcuts() map[string]func() {
+	// The chords follow Typora's defaults, so muscle memory carries over.
 	return map[string]func(){
-		"ctrl+b":               func() { a.wrap("**", "**") },
-		"ctrl+i":               func() { a.wrap("*", "*") },
-		"ctrl+e":               func() { a.wrap("`", "`") },
-		"ctrl+k":               func() { a.wrap("[", "](url)") },
-		"ctrl+s":               a.save,
-		"ctrl+p":               func() { a.commit(); a.previewing = !a.previewing },
-		"ctrl+n":               a.newFile,
-		"esc":                  a.commit,
-		"ctrl+1":               func() { a.prefix("# ") },
-		"ctrl+2":               func() { a.prefix("## ") },
-		"ctrl+3":               func() { a.prefix("### ") },
-		"ctrl+shift+8":         func() { a.prefix("- ") },
-		"ctrl+shift+9":         func() { a.prefix("1. ") },
-		"ctrl+shift+backslash": func() { a.prefix("> ") },
+		"ctrl+b":       func() { a.wrap("**", "**") },
+		"ctrl+i":       func() { a.wrap("*", "*") },
+		"ctrl+shift+`": func() { a.wrap("`", "`") },
+		"alt+shift+5":  func() { a.wrap("~~", "~~") },
+		"ctrl+k":       func() { a.wrap("[", "](url)") },
+		"ctrl+s":       a.save,
+		"esc":          a.commit,
+		"shift+enter":  a.softBreak,
+		"ctrl+1":       func() { a.prefix("# ") },
+		"ctrl+2":       func() { a.prefix("## ") },
+		"ctrl+3":       func() { a.prefix("### ") },
+		"ctrl+4":       func() { a.prefix("#### ") },
+		"ctrl+5":       func() { a.prefix("##### ") },
+		"ctrl+6":       func() { a.prefix("###### ") },
+		"ctrl+0":       func() { a.prefix("") },
+		"ctrl+shift+k": a.codeFence,
+		"ctrl+shift+q": func() { a.prefix("> ") },
+		"ctrl+shift+[": func() { a.prefix("1. ") },
+		"ctrl+shift+]": func() { a.prefix("- ") },
+		"ctrl+p":       a.togglePreview,
+		"ctrl+/":       a.toggleSource,
+		"ctrl+shift+l": a.toggleTree,
 	}
 }
 
@@ -503,6 +705,54 @@ func (a *app) prefix(marker string) {
 	line, col := a.editor.Cursor()
 	out, caret := mddoc.PrefixLine(a.editor.Value(), mddoc.Pos{Line: line, Col: col}, marker)
 	a.replace(out, caret)
+}
+
+// togglePreview shows the whole document rendered and comes back.
+func (a *app) togglePreview() {
+	a.commit()
+	a.previewing = !a.previewing
+}
+
+// toggleTree folds the sidebar away in the working-directory mode.
+func (a *app) toggleTree() {
+	a.treeHidden = !a.treeHidden
+}
+
+// toggleSource shows the whole document as one source block, the way Typora's
+// source code mode does, and returns to blocks afterwards.
+func (a *app) toggleSource() {
+	a.commit()
+	a.sourceMode = !a.sourceMode
+	if a.sourceMode {
+		a.blocks = []mddoc.Block{{Start: 0, End: len(a.doc)}}
+		a.docs = make([]*markdown.Doc, 1)
+		a.active = -1
+		a.before, a.after = "", ""
+		a.activate(0)
+		return
+	}
+	a.split(a.doc)
+	if len(a.blocks) > 0 {
+		a.activate(0)
+	}
+}
+
+// codeFence turns the block under the caret into a fenced code block, and takes
+// the fences off again when it already is one.
+func (a *app) codeFence() {
+	if a.active < 0 {
+		return
+	}
+	lines := strings.Split(a.editor.Value(), "\n")
+	if strings.HasPrefix(strings.TrimLeft(lines[0], " \t"), "```") {
+		lines = lines[1:]
+		if n := len(lines); n > 0 && strings.HasPrefix(strings.TrimLeft(lines[n-1], " \t"), "```") {
+			lines = lines[:n-1]
+		}
+		a.replace(strings.Join(lines, "\n"), mddoc.Pos{Line: 0, Col: 0})
+		return
+	}
+	a.replace("```\n"+a.editor.Value()+"\n```", mddoc.Pos{Line: 1, Col: 0})
 }
 
 // replace writes the edited source back and puts the caret where the command
