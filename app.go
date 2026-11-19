@@ -36,6 +36,11 @@ const (
 	// rendered blocks start where the editor's text starts and switching blocks
 	// does not shift the text sideways.
 	blockIndent = 56
+	// blockGuard is a zero-width character on both ends of the active block's
+	// buffer. keel's editor swallows Backspace and Delete on the buffer's first
+	// and last cell, so a guard going away is the only signal that the key
+	// arrived at a block edge, which is what joins two blocks.
+	blockGuard = "​"
 	// saveDelay is how long typing rests before a working directory writes.
 	saveDelay = 300 * time.Millisecond
 )
@@ -86,6 +91,7 @@ type app struct {
 	statusColor *color.NRGBA
 	treeHidden  bool // the sidebar is folded away
 	sourceMode  bool // the whole document is shown as one source block
+	wholeDoc    bool // Ctrl+A widened from one block to every block
 
 	ready bool
 }
@@ -159,12 +165,9 @@ func (a *app) load(content string) {
 	a.editor.Name(filepath.Base(a.path))
 	a.editor.SetValue("")
 	a.split(content)
-	if a.mode != modeSingle {
-		return
-	}
-	// git hands the editor a file and expects the next keystroke to land in it,
-	// so the first block is open for typing before any click. An empty message
-	// file gets one empty block to write into.
+	// A file opens ready to edit: git hands the editor a file and expects the
+	// next keystroke to land in it, and the workspace needs no click before a
+	// caret exists. An empty file gets one empty block to write into.
 	if len(a.blocks) == 0 {
 		a.appendBlock()
 		return
@@ -214,29 +217,112 @@ func (a *app) text() string {
 	if a.active < 0 {
 		return a.doc
 	}
-	return a.before + a.editor.Value() + a.after
+	return a.before + a.buffer() + a.after
 }
 
-// activate puts the caret in block i: the block swaps to its own source and the
-// rest of the document keeps rendering as markdown.
+// buffer is the block text without the guards that mark its edges.
+func (a *app) buffer() string {
+	return strings.TrimSuffix(strings.TrimPrefix(a.editor.Value(), blockGuard), blockGuard)
+}
+
+// caret returns the caret in the coordinates mddoc works in: keel counts
+// columns in runes, and the guard takes the first one of a block's first line.
+func (a *app) caret() mddoc.Pos {
+	line, col := a.editor.Cursor()
+	if line == 0 && col > 0 {
+		col--
+	}
+	return mddoc.Pos{Line: line, Col: col}
+}
+
+// setBuffer puts text in the editor with the guards around it and the caret at
+// caret, which counts runes of text rather than of the buffer.
+func (a *app) setBuffer(text string, caret mddoc.Pos) {
+	col := caret.Col
+	if caret.Line == 0 {
+		col++
+	}
+	a.editor.SetValue(blockGuard + text + blockGuard)
+	a.editor.SetCursor(caret.Line, col)
+	a.lastValue = a.editor.Value()
+}
+
+// lineAt returns one line of text, without its newline.
+func lineAt(text string, line int) string {
+	start := 0
+	for i := 0; i < line; i++ {
+		n := strings.IndexByte(text[start:], '\n')
+		if n < 0 {
+			return ""
+		}
+		start += n + 1
+	}
+	rest := text[start:]
+	if n := strings.IndexByte(rest, '\n'); n >= 0 {
+		rest = rest[:n]
+	}
+	return rest
+}
+
+// activate makes block i the one under the caret, writing the open block back
+// first.
 func (a *app) activate(i int) {
+	a.commit()
 	if i < 0 || i >= len(a.blocks) {
 		return
 	}
-	if a.active == i {
-		a.editor.Focus()
+	a.active = i
+	a.before, a.after = a.doc[:a.blocks[i].Start], a.doc[a.blocks[i].End:]
+	a.setBuffer(a.blocks[i].Text(a.doc), mddoc.Pos{})
+	a.editor.Focus()
+}
+
+// joinUp merges the block being edited with the one above it, the way deleting
+// the break between two paragraphs does in Typora.
+func (a *app) joinUp() {
+	if a.active <= 0 {
+		a.setBuffer(a.buffer(), mddoc.Pos{})
 		return
 	}
-	a.commit()
-	block := a.blocks[i]
-	a.before, a.after = a.doc[:block.Start], a.doc[block.End:]
-	a.active = i
-	a.editor.Name(filepath.Base(a.path))
-	a.lastValue = block.Text(a.doc)
-	a.editor.SetValue(a.lastValue)
-	a.editor.SetCursor(0, 0)
+	prev, block := a.blocks[a.active-1], a.blocks[a.active]
+	before, above := a.doc[:prev.Start], prev.Text(a.doc)
+	doc := before + above + a.buffer() + a.doc[block.End:]
+	a.place(doc, len(before)+len(above))
+}
+
+// joinDown merges the block below into the one being edited, the way Delete at
+// the end of a paragraph does.
+func (a *app) joinDown() {
+	if a.active < 0 || a.active+1 >= len(a.blocks) {
+		a.setBuffer(a.buffer(), mddoc.Pos{})
+		return
+	}
+	block, next := a.blocks[a.active], a.blocks[a.active+1]
+	text := a.buffer()
+	doc := a.doc[:block.Start] + text + next.Text(a.doc) + a.doc[next.End:]
+	a.place(doc, block.Start+len(text))
+}
+
+// place re-splits the document and puts the caret at offset, inside the block
+// that holds it.
+func (a *app) place(doc string, offset int) {
+	a.doc = doc
+	a.split(doc)
+	index := mddoc.BlockAt(a.blocks, offset)
+	if index < 0 {
+		index = len(a.blocks) - 1
+	}
+	if index < 0 {
+		return
+	}
+	at := mddoc.PosOf(doc, offset)
+	a.activate(index)
+	if a.active != index {
+		return
+	}
+	start := mddoc.PosOf(doc, a.blocks[index].Start)
+	a.setBuffer(a.blocks[index].Text(a.doc), mddoc.Pos{Line: at.Line - start.Line, Col: at.Col})
 	a.editor.Focus()
-	a.pending = true
 }
 
 // commit writes the edited block back into the document and re-splits it.
@@ -244,8 +330,9 @@ func (a *app) commit() {
 	if a.active < 0 {
 		return
 	}
-	a.doc = a.before + a.editor.Value() + a.after
+	a.doc = a.before + a.buffer() + a.after
 	a.active = -1
+	a.wholeDoc = false
 	a.before, a.after = "", ""
 	a.split(a.doc)
 }
@@ -262,27 +349,40 @@ func (a *app) appendBlock() {
 		}
 	}
 	a.split(a.doc)
-	a.editor.SetValue("")
 	a.blocks = append(a.blocks, mddoc.Block{Start: len(a.doc), End: len(a.doc)})
 	a.docs = append(a.docs, nil)
 	a.active = len(a.blocks) - 1
 	a.before, a.after = a.doc, ""
-	a.editor.SetCursor(0, 0)
+	a.setBuffer("", mddoc.Pos{})
 	a.editor.Focus()
-	a.changed("")
+	a.changed(a.lastValue)
 }
 
 // changed runs on every editor change. Decorations wait for the next frame so a
 // burst of keystrokes costs one parse.
-func (a *app) changed(text string) {
+func (a *app) changed(raw string) {
 	if a.splitting {
-		a.lastValue = text
+		a.lastValue = raw
 		return
 	}
+	// keel swallows Backspace on the buffer's first cell, so the guard going
+	// away is the trace of that key: it joins the block above instead, the way
+	// deleting a paragraph break does in Typora.
+	if strings.HasSuffix(a.lastValue, blockGuard) && !strings.HasSuffix(raw, blockGuard) {
+		a.lastValue = raw
+		a.joinDown()
+		return
+	}
+	if strings.HasPrefix(a.lastValue, blockGuard) && !strings.HasPrefix(raw, blockGuard) {
+		a.lastValue = raw
+		a.joinUp()
+		return
+	}
+	text := a.buffer()
 	// Source mode edits the document as one block, so Enter stays a plain
 	// newline there instead of starting a new block.
 	if a.sourceMode {
-		a.lastValue = text
+		a.lastValue = raw
 		a.dirty = text != a.saved
 		a.pending = true
 		if a.mode == modeWorkspace {
@@ -290,12 +390,12 @@ func (a *app) changed(text string) {
 		}
 		return
 	}
-	if off, ok := newlineInsertion(a.lastValue, text); ok {
-		a.lastValue = text
-		a.splitAtCaret(off)
+	if off, ok := newlineInsertion(a.lastValue, raw); ok {
+		a.lastValue = raw
+		a.splitAt(off - len(blockGuard))
 		return
 	}
-	a.lastValue = text
+	a.lastValue = raw
 	full := a.text()
 	a.dirty = full != a.saved
 	a.pending = true
@@ -323,16 +423,16 @@ func newlineInsertion(prev, next string) (int, bool) {
 
 // splitAtCaret turns the text above off as its own block and keeps editing the
 // text below it, so everything already written renders again.
-func (a *app) splitAtCaret(off int) {
+func (a *app) splitAt(off int) {
 	if a.active < 0 {
 		return
 	}
-	value := a.editor.Value()
+	value := a.buffer()
 	if off <= 0 || off > len(value) {
 		return
 	}
 	head := strings.TrimRight(value[:off], "\n")
-	tail := value[off:]
+	tail := strings.TrimLeft(value[off:], "\n")
 	line := head
 	if i := strings.LastIndexByte(head, '\n'); i >= 0 {
 		line = head[i+1:]
@@ -375,14 +475,41 @@ func (a *app) splitAtCaret(off int) {
 
 // continueList keeps Enter inside a list: the new line carries the same marker
 // and the list stays one block. Enter on an item with no text leaves the list.
-func (a *app) continueList(value string, off int, line, next string) {
+func (a *app) continueList(value string, at int, line, next string) {
 	if next == "" {
-		start := off - 1 - len(line)
-		a.setValue(value[:start]+value[off:], mddoc.Pos{Line: strings.Count(value[:start], "\n")})
+		// An empty item leaves the list: the marker and its space go too.
+		start := at - 1 - len(line)
+		if start < 0 {
+			start = 0
+		}
+		a.setValue(value[:start], mddoc.Pos{Line: strings.Count(value[:start], "\n")})
 		return
 	}
-	out := value[:off] + next + value[off:]
-	a.setValue(out, mddoc.Pos{Line: strings.Count(value[:off], "\n"), Col: utf8.RuneCountInString(next)})
+	out := value[:at] + next + value[at:]
+	a.setValue(out, mddoc.Pos{Line: strings.Count(value[:at], "\n"), Col: utf8.RuneCountInString(next)})
+}
+
+// newLine starts the next paragraph, or continues the list the caret is in,
+// the way Enter does in Typora. The window registers it for Enter so the
+// buffer guards stay the only trace of the key inside the editor.
+func (a *app) newLine() {
+	if a.active < 0 || a.previewing {
+		return
+	}
+	value := a.buffer()
+	at := a.caret()
+	line := lineAt(value, at.Line)
+	out, caret := mddoc.Insert(value, at, "\n")
+	inserted := mddoc.Offset(out, caret)
+	a.setValue(out, caret)
+	if a.sourceMode || mddoc.InsideFence(value, at.Line) {
+		return
+	}
+	if next, ok := mddoc.ListNext(line); ok {
+		a.continueList(out, inserted, line, next)
+		return
+	}
+	a.splitAt(inserted)
 }
 
 // softBreak adds a line break inside the block instead of starting a new one,
@@ -391,8 +518,7 @@ func (a *app) softBreak() {
 	if a.active < 0 || a.previewing || a.sourceMode {
 		return
 	}
-	line, col := a.editor.Cursor()
-	out, caret := mddoc.Insert(a.editor.Value(), mddoc.Pos{Line: line, Col: col}, "\n")
+	out, caret := mddoc.Insert(a.buffer(), a.caret(), "\n")
 	a.setValue(out, caret)
 }
 
@@ -400,16 +526,14 @@ func (a *app) softBreak() {
 // to changed, so a continued list or a soft break stays in the same block.
 func (a *app) setValue(src string, caret mddoc.Pos) {
 	a.splitting = true
-	a.editor.SetValue(src)
-	a.editor.SetCursor(caret.Line, caret.Col)
-	a.changed(src)
+	a.setBuffer(src, caret)
 	a.splitting = false
 	a.touch(src)
 }
 
 // touch records an edit that keeps the block boundaries as they are.
 func (a *app) touch(value string) {
-	a.lastValue = value
+	a.lastValue = blockGuard + value + blockGuard
 	a.dirty = a.text() != a.saved
 	a.pending = true
 	if a.mode == modeWorkspace {
@@ -487,7 +611,7 @@ func (a *app) Render(cx *el.Context) el.Element {
 	a.once()
 	if a.pending {
 		a.pending = false
-		a.applyDecorations(a.editor.Value())
+		a.applyDecorations(a.buffer())
 	}
 
 	pal := theme.Current()
@@ -620,9 +744,38 @@ func taskBox(checked bool) el.Element {
 
 // activeEditor draws the block under the caret at its own height.
 func (a *app) activeEditor(cx *el.Context) el.Element {
-	lines := strings.Count(a.editor.Value(), "\n") + 1
+	a.widenSelection()
+	lines := strings.Count(a.buffer(), "\n") + 1
 	height := float32(lines*lineHeight + 24)
 	return el.Div().WFull().Child(a.editor.Height(height).Render(cx))
+}
+
+// widenSelection turns a fully selected block into the whole document, so the
+// next Ctrl+A selects every block. kit.CodeEditor cannot be handed a selection
+// but it does select its whole buffer, and there the buffer is one block.
+func (a *app) widenSelection() {
+	if a.wholeDoc || a.sourceMode || a.previewing || a.active < 0 || len(a.blocks) < 2 {
+		return
+	}
+	value := a.buffer()
+	selected := strings.TrimSuffix(strings.TrimPrefix(a.editor.Selection(), blockGuard), blockGuard)
+	if value == "" || selected != value {
+		return
+	}
+	at := a.caret()
+	at.Line += strings.Count(a.before, "\n")
+	a.wholeDoc = true
+	a.splitting = true
+	a.doc = a.before + value + a.after
+	a.before, a.after = "", ""
+	a.blocks = []mddoc.Block{{Start: 0, End: len(a.doc)}}
+	a.docs = make([]*markdown.Doc, 1)
+	a.active = 0
+	a.setBuffer(a.doc, at)
+	a.lastValue = a.editor.Value()
+	a.splitting = false
+	a.pending = true
+	a.editor.Focus()
 }
 
 // title is the path shown at the left of the status bar.
@@ -667,6 +820,7 @@ func (a *app) shortcuts() map[string]func() {
 		"alt+shift+5":  func() { a.wrap("~~", "~~") },
 		"ctrl+k":       func() { a.wrap("[", "](url)") },
 		"ctrl+s":       a.save,
+		"enter":        a.newLine,
 		"esc":          a.commit,
 		"shift+enter":  a.softBreak,
 		"ctrl+1":       func() { a.prefix("# ") },
@@ -691,9 +845,8 @@ func (a *app) wrap(open, close string) {
 	if a.active < 0 {
 		return
 	}
-	line, col := a.editor.Cursor()
-	src := a.editor.Value()
-	out, caret := mddoc.WrapSel(src, mddoc.Pos{Line: line, Col: col}, a.editor.Selection(), open, close)
+	selected := strings.TrimSuffix(strings.TrimPrefix(a.editor.Selection(), blockGuard), blockGuard)
+	out, caret := mddoc.WrapSel(a.buffer(), a.caret(), selected, open, close)
 	a.replace(out, caret)
 }
 
@@ -702,8 +855,7 @@ func (a *app) prefix(marker string) {
 	if a.active < 0 {
 		return
 	}
-	line, col := a.editor.Cursor()
-	out, caret := mddoc.PrefixLine(a.editor.Value(), mddoc.Pos{Line: line, Col: col}, marker)
+	out, caret := mddoc.PrefixLine(a.buffer(), a.caret(), marker)
 	a.replace(out, caret)
 }
 
@@ -743,7 +895,7 @@ func (a *app) codeFence() {
 	if a.active < 0 {
 		return
 	}
-	lines := strings.Split(a.editor.Value(), "\n")
+	lines := strings.Split(a.buffer(), "\n")
 	if strings.HasPrefix(strings.TrimLeft(lines[0], " \t"), "```") {
 		lines = lines[1:]
 		if n := len(lines); n > 0 && strings.HasPrefix(strings.TrimLeft(lines[n-1], " \t"), "```") {
@@ -752,15 +904,13 @@ func (a *app) codeFence() {
 		a.replace(strings.Join(lines, "\n"), mddoc.Pos{Line: 0, Col: 0})
 		return
 	}
-	a.replace("```\n"+a.editor.Value()+"\n```", mddoc.Pos{Line: 1, Col: 0})
+	a.replace("```\n"+a.buffer()+"\n```", mddoc.Pos{Line: 1, Col: 0})
 }
 
 // replace writes the edited source back and puts the caret where the command
 // left it.
 func (a *app) replace(src string, caret mddoc.Pos) {
-	a.editor.SetValue(src)
-	a.editor.SetCursor(caret.Line, caret.Col)
-	a.changed(src)
+	a.setValue(src, caret)
 	a.pending = true
 }
 

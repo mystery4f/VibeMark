@@ -111,6 +111,16 @@ func (l *lineIndex) expandDelimiters(start, end int) (int, int) {
 	return start, end
 }
 
+// Offset converts a rune position into the byte offset that holds it.
+func Offset(src string, p Pos) int {
+	return offset(src, p)
+}
+
+// PosOf converts a byte offset into the rune position that holds it.
+func PosOf(src string, off int) Pos {
+	return newLineIndex(src).pos(off)
+}
+
 // offset converts a rune position back into a byte offset, clamped to src.
 func offset(src string, p Pos) int {
 	if p.Line < 0 || p.Col < 0 {

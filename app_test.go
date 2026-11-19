@@ -11,6 +11,8 @@ import (
 	"github.com/dyike/keel/ui/el"
 	"github.com/dyike/keel/ui/window"
 	"github.com/dyike/keel/ui/window/windowtest"
+
+	"github.com/mystery4f/vibemark/internal/mddoc"
 )
 
 // writeNote puts one markdown file in a fresh directory and returns its path.
@@ -112,7 +114,7 @@ func TestPressingABlockShowsItsSource(t *testing.T) {
 
 	app.Click("项目")
 	app.Want("- 项目")
-	if got := a.editor.Value(); !strings.Contains(got, "- 项目") {
+	if got := a.buffer(); !strings.Contains(got, "- 项目") {
 		t.Fatalf("editor = %q, want the pressed block source", got)
 	}
 }
@@ -129,10 +131,10 @@ func TestCommittingABlockWritesBack(t *testing.T) {
 	a.once()
 
 	a.activate(1)
-	if got := a.editor.Value(); got != "正文" {
+	if got := a.buffer(); got != "正文" {
 		t.Fatalf("active block source = %q, want 正文", got)
 	}
-	a.editor.SetValue("改过的正文")
+	a.setBuffer("改过的正文", mddoc.Pos{})
 	a.commit()
 
 	if want := "# 标题\n\n改过的正文\n"; a.doc != want {
@@ -246,10 +248,9 @@ func TestBoldWrapsTheSelection(t *testing.T) {
 	a := newApp(path, "")
 	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
-	a.editor.SetValue("加粗这句")
-	a.editor.SetCursor(0, 0)
+	a.setBuffer("加粗这句", mddoc.Pos{})
 	a.wrap("**", "**")
-	if got := a.editor.Value(); got != "****加粗这句" {
+	if got := a.buffer(); got != "****加粗这句" {
 		t.Fatalf("value = %q, want the markers around the caret", got)
 	}
 }
@@ -261,8 +262,8 @@ func TestWorkspaceAutosaves(t *testing.T) {
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
 	a.activate(1)
-	a.editor.SetValue("自动保存的正文")
-	a.changed("自动保存的正文")
+	a.setBuffer("自动保存的正文", mddoc.Pos{})
+	a.changed(a.lastValue)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(mustRead(t, path), "自动保存的正文") {
@@ -282,9 +283,7 @@ func TestEnterCommitsTheLineAbove(t *testing.T) {
 	a := newApp(path, "")
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
-	a.editor.SetValue("第一行\n第二行")
-	a.changed(a.editor.Value())
-	a.editor.SetCursor(0, 3)
+	a.setBuffer("第一行\n第二行", mddoc.Pos{Line: 0, Col: 3})
 	app.Press("enter")
 
 	if got := a.text(); !strings.Contains(got, "第一行\n\n第二行") {
@@ -293,7 +292,7 @@ func TestEnterCommitsTheLineAbove(t *testing.T) {
 	if a.active < 0 {
 		t.Fatal("the caret left the editor; the second line must stay editable")
 	}
-	if got := a.editor.Value(); got != "第二行" {
+	if got := a.buffer(); got != "第二行" {
 		t.Fatalf("editor = %q, want only the line below the caret", got)
 	}
 }
@@ -304,16 +303,14 @@ func TestEnterAtTheEndStartsANewBlock(t *testing.T) {
 	a := newApp(path, "")
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
-	a.editor.SetValue("只有一行")
-	a.changed(a.editor.Value())
-	a.editor.SetCursor(0, 4)
+	a.setBuffer("只有一行", mddoc.Pos{Line: 0, Col: 4})
 	before := len(a.blocks)
 	app.Press("enter")
 
 	if a.active < 0 {
 		t.Fatal("no block is open after Enter")
 	}
-	if got := a.editor.Value(); got != "" {
+	if got := a.buffer(); got != "" {
 		t.Fatalf("editor = %q, want an empty block", got)
 	}
 	if len(a.blocks) != before+1 {
@@ -329,12 +326,12 @@ func TestHeadingAndParagraphShortcuts(t *testing.T) {
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
 	app.Press("ctrl+3")
-	if got := a.editor.Value(); got != "### 标题" {
+	if got := a.buffer(); got != "### 标题" {
 		t.Fatalf("editor = %q, want a third-level heading", got)
 	}
 
 	app.Press("ctrl+0")
-	if got := a.editor.Value(); got != "标题" {
+	if got := a.buffer(); got != "标题" {
 		t.Fatalf("editor = %q, want the plain paragraph back", got)
 	}
 }
@@ -347,18 +344,18 @@ func TestFenceAndInlineShortcuts(t *testing.T) {
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
 	app.Press("ctrl+shift+k")
-	if got := a.editor.Value(); got != "```\n# 标题\n```" {
+	if got := a.buffer(); got != "```\n# 标题\n```" {
 		t.Fatalf("editor = %q, want a fenced block", got)
 	}
 	app.Press("ctrl+shift+k")
-	if got := a.editor.Value(); got != "# 标题" {
+	if got := a.buffer(); got != "# 标题" {
 		t.Fatalf("editor = %q, want the fences gone", got)
 	}
 
 	a.editor.SetCursor(0, 5)
-	a.changed(a.editor.Value())
+	a.changed(a.lastValue)
 	app.Press("alt+shift+5")
-	if got := a.editor.Value(); !strings.Contains(got, "~~~~") {
+	if got := a.buffer(); !strings.Contains(got, "~~~~") {
 		t.Fatalf("editor = %q, want an empty strike pair", got)
 	}
 }
@@ -375,7 +372,7 @@ func TestSourceModeShortcut(t *testing.T) {
 	if !a.sourceMode || len(a.blocks) != 1 {
 		t.Fatalf("sourceMode = %v, blocks = %d, want one source block", a.sourceMode, len(a.blocks))
 	}
-	if got := a.editor.Value(); !strings.Contains(got, "# 标题\n\n正文") {
+	if got := a.buffer(); !strings.Contains(got, "# 标题\n\n正文") {
 		t.Fatalf("editor = %q, want the whole document", got)
 	}
 
@@ -392,13 +389,11 @@ func TestEnterContinuesTheList(t *testing.T) {
 	a := newApp(path, "")
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
-	a.editor.SetValue("- 项目")
-	a.changed("- 项目")
-	a.editor.SetCursor(0, 4)
+	a.setBuffer("- 项目", mddoc.Pos{Line: 0, Col: 4})
 	blocks := len(a.blocks)
 
 	app.Press("enter")
-	if got, want := a.editor.Value(), "- 项目\n- "; got != want {
+	if got, want := a.buffer(), "- 项目\n- "; got != want {
 		t.Fatalf("editor = %q, want %q", got, want)
 	}
 	if len(a.blocks) != blocks {
@@ -412,12 +407,10 @@ func TestEnterOnAnEmptyItemLeavesTheList(t *testing.T) {
 	a := newApp(path, "")
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
-	a.editor.SetValue("- ")
-	a.changed("- ")
-	a.editor.SetCursor(0, 2)
+	a.setBuffer("- ", mddoc.Pos{Line: 0, Col: 2})
 
 	app.Press("enter")
-	if got := a.editor.Value(); got != "" {
+	if got := a.buffer(); got != "" {
 		t.Fatalf("editor = %q, want the marker gone", got)
 	}
 }
@@ -429,10 +422,10 @@ func TestShiftEnterStaysInTheBlock(t *testing.T) {
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
 	blocks := len(a.blocks)
-	a.editor.SetCursor(0, 4)
+	a.editor.SetCursor(0, 1+4)
 
 	app.Press("shift+enter")
-	got := a.editor.Value()
+	got := a.buffer()
 	if !strings.HasPrefix(got, "# 标题\n") {
 		t.Fatalf("editor = %q, want a break after the heading", got)
 	}
@@ -458,7 +451,115 @@ func TestEnterInsideAFenceKeepsTheBlock(t *testing.T) {
 	if len(a.blocks) != blocks {
 		t.Fatalf("blocks = %d, want %d", len(a.blocks), blocks)
 	}
-	if got := a.editor.Value(); !strings.HasPrefix(got, "```\ncode\n") {
+	if got := a.buffer(); !strings.HasPrefix(got, "```\ncode\n") {
 		t.Fatalf("editor = %q, want the fence kept", got)
+	}
+}
+
+// Ctrl+A selects the text of the block being edited.
+func TestCtrlASelectsTheBlock(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	app.Press("ctrl+a")
+	if got := strings.Trim(a.editor.Selection(), blockGuard); got != "# 标题" {
+		t.Fatalf("selection = %q, want the whole block", got)
+	}
+}
+
+// Clicking a rendered block and then pressing Ctrl+A selects its text.
+func TestCtrlAAfterClickingABlock(t *testing.T) {
+	dir, _ := writeNote(t)
+	a := newApp("", dir)
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	app.Click("正文")
+	app.Press("ctrl+a")
+	if got := strings.Trim(a.editor.Selection(), blockGuard); got != "正文" {
+		t.Fatalf("selection = %q, want the clicked block", got)
+	}
+}
+
+// A file opened in the workspace starts with a block ready to edit, so Ctrl+A
+// selects text without a click first.
+func TestCtrlAWorksOnAFreshWorkspaceFile(t *testing.T) {
+	dir, _ := writeNote(t)
+	a := newApp("", dir)
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	app.Press("ctrl+a")
+	if got := strings.Trim(a.editor.Selection(), blockGuard); got != "# 标题" {
+		t.Fatalf("selection = %q, want the first block", got)
+	}
+}
+
+// Backspace at the start of a block joins it to the one above: the guard going
+// away is the trace keel leaves for a key it swallowed.
+func TestBackspaceAtBlockStartMergesUp(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.changed(blockGuard + "正文" + blockGuard)
+	a.changed("正文" + blockGuard)
+
+	if got, want := a.text(), "# 标题正文"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+	if got, want := a.buffer(), "# 标题正文"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+	if got, want := a.caret(), (mddoc.Pos{Line: 0, Col: 4}); got != want {
+		t.Fatalf("caret = %v, want the junction %v", got, want)
+	}
+}
+
+// Delete at the end of a block pulls the block below up.
+func TestDeleteAtBlockEndMergesDown(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(0)
+	a.changed(blockGuard + "# 标题" + blockGuard)
+	a.changed(blockGuard + "# 标题")
+
+	if got, want := a.text(), "# 标题正文"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+}
+
+// The guards mark block edges in the editor and never reach the file.
+func TestGuardsStayOutOfTheFile(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.save()
+
+	if got := mustRead(t, path); strings.Contains(got, blockGuard) {
+		t.Fatalf("file = %q, want the guards kept out", got)
+	}
+}
+
+// Backspace at the start of the first block has nothing to join, so the guard
+// comes back and the document stays as it was.
+func TestBackspaceAtTheFirstBlockKeepsTheDocument(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(0)
+	a.changed(blockGuard + "# 标题" + blockGuard)
+	a.changed("# 标题" + blockGuard)
+
+	if got, want := a.text(), "# 标题\n\n正文"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+	if got, want := a.editor.Value(), blockGuard+"# 标题"+blockGuard; got != want {
+		t.Fatalf("buffer = %q, want the guard restored", got)
 	}
 }
