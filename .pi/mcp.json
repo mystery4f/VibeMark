@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "keel": {
+      "command": "keel-mcp"
+    }
+  }
+}

@@ -31,8 +31,10 @@ keel 的装饰既不能隐藏字符也不能改字宽，所以真 WYSIWYG 只能
 
 | 组合 | 作用 |
 | --- | --- |
-| `Enter` | 列表项内继续同一列表，否则另起一块 |
+| `Enter` | 列表项内续写同一个标记、另起一块，或插入空行 |
 | `Shift+Enter` | 在同一块内换行 |
+| `Ctrl+V` | 粘贴文字、文件或截图：图片复制进 `assets/` 并直接显示，其它文件变成链接 |
+| 块首/块尾 `Backspace`、`Delete` | 与相邻块合并 |
 | `Esc` | 提交当前正在编辑的块 |
 | `Ctrl+S` | 保存 |
 | `Ctrl+P` | 全屏预览开关 |
@@ -50,6 +52,16 @@ keel 的装饰既不能隐藏字符也不能改字宽，所以真 WYSIWYG 只能
 
 键位沿用 Typora 默认，肌肉记忆可以直接带过来。
 
+## 图片
+
+粘贴或引用的图片存在文档旁边的 `assets/` 目录里，笔记和图片一起搬家：
+
+```markdown
+![shot.png](assets/shot.png)
+```
+
+渲染器只读本地文件；`https://` 这类远程地址会被忽略而不是去下载，打开笔记不会碰网络。
+
 ## 当作 git 编辑器
 
 ```sh
@@ -66,6 +78,22 @@ go test ./...       # 界面测试走 keel 的 windowtest，不开真窗口
 gofmt -l .          # .githooks/pre-commit 会连同 vet 和 test 一起检查
 ```
 
+`windowtest` 只合成按键事件，碰不到真实键盘和剪贴板，所以依赖系统的那部分用 keel
+自带的自动化服务器 `keel-mcp` 验证（`go install github.com/dyike/keel/cmd/keel-mcp@v0.4.11`，
+配置在 [`.pi/mcp.json`](.pi/mcp.json)）：
+
+```sh
+go build -o .tmp/vibemark.exe .
+# 然后通过 MCP 工具驱动真实窗口：
+#   launch    {"command": "…/.tmp/vibemark.exe --dir .tmp/demo"}
+#   click     {"text": "正文"}
+#   press_key {"key": "backspace"}
+#   press_key {"key": "ctrl+v"}
+```
+
+默认离屏运行，`visible: true` 则显示在屏幕上。跨块删除、剪贴板粘贴、自动保存都靠它
+端到端验过。
+
 每个克隆启用一次钩子：`git config core.hooksPath .githooks`。
 
 设计记录在 [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.md)、
@@ -77,4 +105,7 @@ gofmt -l .          # .githooks/pre-commit 会连同 vet 和 test 一起检查
   换成普通文本框又会丢掉包裹类命令需要的光标与选区接口。
 - 撤销只覆盖当前正在编辑的块。
 - 点一下是选中一个块，不是把光标定位到某个字；要在块里定位请再点一次。
-- 没有系统文件对话框、不支持文件拖入、不显示图片：keel v0.4.11 在桌面端都没有。
+- 没有系统文件对话框、不支持文件拖入：keel v0.4.11 在桌面端都没有，所以图片只能
+  通过剪贴板进来。
+- 每个正在编辑的块首尾各带一个不可见的 `U+200B` 守卫字符。keel 的缓冲区没有设置
+  选区的接口，删掉守卫是「退格跨过了块边界」的唯一信号；写入文件前会去掉它们。

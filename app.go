@@ -1,20 +1,25 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"image"
 	"image/color"
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	nativeclip "github.com/dyike/keel/native/clipboard"
 	"github.com/dyike/keel/ui/core"
 	"github.com/dyike/keel/ui/el"
 	"github.com/dyike/keel/ui/kit"
 	"github.com/dyike/keel/ui/markdown"
 	"github.com/dyike/keel/ui/theme"
+	"github.com/mystery4f/vibemark/internal/assets"
 	"github.com/mystery4f/vibemark/internal/mddoc"
 	"github.com/mystery4f/vibemark/internal/workspace"
 )
@@ -85,8 +90,9 @@ type app struct {
 	saved       string
 	dirty       bool
 	previewing  bool
-	pending     bool // decorations are stale and must be rebuilt
-	saveArmed   bool // a debounce timer is running
+	pending     bool        // decorations are stale and must be rebuilt
+	saveArmed   atomic.Bool // a debounce timer is running
+	saveDue     atomic.Bool // the debounce elapsed; the write runs in the next frame
 	status      string
 	statusColor *color.NRGBA
 	treeHidden  bool // the sidebar is folded away
@@ -115,6 +121,7 @@ func (a *app) once() {
 		return
 	}
 	a.ready = true
+	a.preview = a.newDoc("")
 
 	a.editor = kit.CodeEditor("").
 		Language("markdown").
@@ -323,6 +330,7 @@ func (a *app) place(doc string, offset int) {
 	start := mddoc.PosOf(doc, a.blocks[index].Start)
 	a.setBuffer(a.blocks[index].Text(a.doc), mddoc.Pos{Line: at.Line - start.Line, Col: at.Col})
 	a.editor.Focus()
+	a.touch(a.buffer())
 }
 
 // commit writes the edited block back into the document and re-splits it.
@@ -451,10 +459,13 @@ func (a *app) splitAt(off int) {
 		a.appendBlock()
 		return
 	}
-	gap := "\n\n"
+	// Enter at the start of a block adds an empty line above the text, the way
+	// it does in Typora; an empty block cannot exist, so the break stays here.
 	if head == "" {
-		gap = ""
+		a.touch(value)
+		return
 	}
+	gap := "\n\n"
 	doc := a.before + head + gap + tail + a.after
 	start := len(a.before) + len(head) + len(gap)
 	a.splitting = true
@@ -505,6 +516,11 @@ func (a *app) newLine() {
 	if a.sourceMode || mddoc.InsideFence(value, at.Line) {
 		return
 	}
+	// An empty line only gains another one: there is no text to split off,
+	// and Enter has to move the caret down whether the line holds text or not.
+	if strings.TrimSpace(line) == "" {
+		return
+	}
 	if next, ok := mddoc.ListNext(line); ok {
 		a.continueList(out, inserted, line, next)
 		return
@@ -544,17 +560,15 @@ func (a *app) touch(value string) {
 // scheduleSave writes 300ms after the last keystroke. Working-directory mode has
 // no unsaved marker, so the write must follow the typing closely.
 func (a *app) scheduleSave() {
-	if a.saveArmed {
+	if a.mode != modeWorkspace || !a.saveArmed.CompareAndSwap(false, true) {
 		return
 	}
-	a.saveArmed = true
 	time.AfterFunc(saveDelay, func() {
-		core.Update(func() {
-			a.saveArmed = false
-			if a.dirty {
-				a.save()
-			}
-		})
+		// The write itself runs in a frame, where the editor buffer belongs to
+		// this goroutine; asking for one only needs an invalidation.
+		a.saveArmed.Store(false)
+		a.saveDue.Store(true)
+		core.Update(func() {})
 	})
 }
 
@@ -609,6 +623,10 @@ func (a *app) applyDecorations(src string) {
 // Render draws the window: tree, the column of blocks, then the status bar.
 func (a *app) Render(cx *el.Context) el.Element {
 	a.once()
+	// A save that came due while the window was idle runs here, in a frame.
+	if a.saveDue.Swap(false) && a.dirty {
+		a.save()
+	}
 	if a.pending {
 		a.pending = false
 		a.applyDecorations(a.buffer())
@@ -672,7 +690,7 @@ func (a *app) blockView(cx *el.Context, i int, pal theme.Palette) el.Element {
 		return press.Child(taskList(cx, items))
 	}
 	if a.docs[i] == nil {
-		a.docs[i] = markdown.New(text)
+		a.docs[i] = a.newDoc(text)
 	}
 	return press.Child(a.docs[i].Render(cx))
 }
@@ -819,6 +837,7 @@ func (a *app) shortcuts() map[string]func() {
 		"ctrl+shift+`": func() { a.wrap("`", "`") },
 		"alt+shift+5":  func() { a.wrap("~~", "~~") },
 		"ctrl+k":       func() { a.wrap("[", "](url)") },
+		"ctrl+v":       a.paste,
 		"ctrl+s":       a.save,
 		"enter":        a.newLine,
 		"esc":          a.commit,
@@ -912,6 +931,102 @@ func (a *app) codeFence() {
 func (a *app) replace(src string, caret mddoc.Pos) {
 	a.setValue(src, caret)
 	a.pending = true
+}
+
+// newDoc builds a rendered block whose pictures load from the document's own
+// folder, so a relative ![](assets/x.png) resolves next to the note.
+func (a *app) newDoc(text string) *markdown.Doc {
+	return markdown.New(text).ImageLoader(a.loadImage)
+}
+
+// docDir is the folder the open document lives in.
+func (a *app) docDir() string {
+	if a.path != "" {
+		return filepath.Dir(a.path)
+	}
+	return a.dir
+}
+
+// loadImage reads a picture for the renderer. Remote sources stay off, so a
+// note never reaches the network by accident.
+func (a *app) loadImage(ctx context.Context, src string) (image.Image, error) {
+	if strings.Contains(src, "://") || strings.HasPrefix(src, "data:") {
+		return nil, fmt.Errorf("%s: only local pictures are read", src)
+	}
+	path := filepath.FromSlash(src)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(a.docDir(), path)
+	}
+	return markdown.DecodeImage(ctx, path)
+}
+
+// paste puts the clipboard into the open block: pictures are copied next to the
+// document and shown, other files become markdown links, and plain text lands
+// as it is.
+func (a *app) paste() {
+	if a.active < 0 || a.previewing {
+		return
+	}
+	nativeclip.Read(func(data nativeclip.Data, err error) {
+		if err != nil {
+			core.Update(func() { a.fail(userError("粘贴", "剪贴板", err)) })
+			return
+		}
+		core.Update(func() { a.insertPasted(data) })
+	})
+}
+
+// insertPasted writes one clipboard snapshot at the caret.
+func (a *app) insertPasted(data nativeclip.Data) {
+	if a.active < 0 || a.previewing {
+		return
+	}
+	var parts []string
+	for _, file := range data.Files {
+		rel, err := assets.Copy(a.docDir(), file)
+		if err != nil {
+			continue
+		}
+		if assets.Image(file) {
+			parts = append(parts, "!["+assets.Name(file)+"]("+rel+")")
+			continue
+		}
+		parts = append(parts, "["+assets.Name(file)+"]("+rel+")")
+	}
+	// A picture held as bytes, e.g. a screenshot, arrives without a file name.
+	for i, pic := range data.Images {
+		name := fmt.Sprintf("pasted-%d%s", i+1, pasteExt(pic.MIME))
+		rel, err := assets.Save(a.docDir(), name, pic.Data)
+		if err != nil {
+			continue
+		}
+		parts = append(parts, "![]("+rel+")")
+	}
+	text := data.Text
+	if len(parts) > 0 {
+		text = strings.Join(parts, "\n")
+	}
+	if text == "" {
+		return
+	}
+	out, caret := mddoc.Insert(a.buffer(), a.caret(), text)
+	a.setValue(out, caret)
+}
+
+// pasteExt maps a clipboard media type to the extension the saved file gets.
+func pasteExt(mime string) string {
+	switch strings.ToLower(strings.TrimSpace(mime)) {
+	case "image/bmp":
+		return ".bmp"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
 }
 
 // treeNodes converts the scanned directory into keel tree nodes.

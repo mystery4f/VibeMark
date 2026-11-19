@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"testing"
@@ -126,4 +130,43 @@ func TestCaptureActiveBlock(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(out, "single-file-active-block-1024x768.png"), png, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestCapturePicture writes a render of a note that embeds a local picture, so
+// the image path can be checked without a real window.
+func TestCapturePicture(t *testing.T) {
+	out := os.Getenv("VIBEMARK_RENDERS")
+	if out == "" {
+		t.Skip("set VIBEMARK_RENDERS to a directory to capture renders")
+	}
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "assets", "dot.png"), pngBytes(t))
+	notes := filepath.Join(dir, "note.md")
+	write(t, notes, "# 图\n\n![dot](assets/dot.png)\n\n后面一段\n")
+
+	a := newApp(notes, "")
+	app := windowtest.New(t, window.Options{Width: 640, Height: 480, Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app.Render()
+	if err := os.WriteFile(filepath.Join(out, "picture-640x480.png"), app.Screenshot(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pngBytes is a small solid picture, enough to prove the renderer decodes it.
+func pngBytes(t *testing.T) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			img.Set(x, y, color.RGBA{R: 0x2f, G: 0x6f, B: 0xed, A: 0xff})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	nativeclip "github.com/dyike/keel/native/clipboard"
 	"github.com/dyike/keel/ui/el"
 	"github.com/dyike/keel/ui/window"
 	"github.com/dyike/keel/ui/window/windowtest"
@@ -561,5 +563,165 @@ func TestBackspaceAtTheFirstBlockKeepsTheDocument(t *testing.T) {
 	}
 	if got, want := a.editor.Value(), blockGuard+"# 标题"+blockGuard; got != want {
 		t.Fatalf("buffer = %q, want the guard restored", got)
+	}
+}
+
+// Pasted plain text lands at the caret, inside the open block.
+func TestPastedTextLandsAtTheCaret(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.insertPasted(nativeclip.Data{Text: "新"})
+
+	if got, want := a.buffer(), "新正文"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+}
+
+// A pasted picture is copied next to the document and embedded there.
+func TestPastedPictureIsCopied(t *testing.T) {
+	dir, path := writeNote(t)
+	src := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(src, []byte("pixels"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.insertPasted(nativeclip.Data{Files: []string{src}})
+
+	if got, want := a.buffer(), "![shot.png](assets/shot.png)正文"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+	if got := mustRead(t, filepath.Join(dir, "assets", "shot.png")); got != "pixels" {
+		t.Fatalf("copied file = %q", got)
+	}
+}
+
+// Any other file becomes a markdown link to the copy.
+func TestPastedFileBecomesALink(t *testing.T) {
+	dir, path := writeNote(t)
+	src := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.insertPasted(nativeclip.Data{Files: []string{src}})
+
+	if got, want := a.buffer(), "[notes.txt](assets/notes.txt)正文"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+}
+
+// A picture held as clipboard bytes is saved with an extension from its type.
+func TestPastedPictureBytesAreSaved(t *testing.T) {
+	dir, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.insertPasted(nativeclip.Data{Images: []nativeclip.Image{{MIME: "image/bmp", Data: []byte("bmp")}}})
+
+	if got, want := a.buffer(), "![](assets/pasted-1.bmp)正文"; got != want {
+		t.Fatalf("editor = %q, want %q", got, want)
+	}
+	if got := mustRead(t, filepath.Join(dir, "assets", "pasted-1.bmp")); got != "bmp" {
+		t.Fatalf("saved file = %q", got)
+	}
+}
+
+// The renderer reads local pictures only; a note never reaches the network.
+func TestRemotePicturesStayOff(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+
+	if _, err := a.loadImage(context.Background(), "https://example.com/a.png"); err == nil {
+		t.Fatal("a remote picture was loaded")
+	}
+}
+
+// A join across blocks is an edit like any other: it marks the document dirty
+// and, in the workspace, schedules the save.
+func TestJoiningBlocksMarksTheDocumentDirty(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.joinUp()
+
+	if !a.dirty {
+		t.Fatal("the document stayed clean after the blocks merged")
+	}
+	if got, want := a.text(), "# 标题正文"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+}
+
+// The merge of two blocks must reach the file: in the workspace the save runs
+// three hundred milliseconds after the last key, so the test waits for it.
+func TestMergedBlocksAreSaved(t *testing.T) {
+	dir, _ := writeNote(t)
+	a := newApp("", dir)
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.joinUp()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		app.Render()
+		if got := mustRead(t, filepath.Join(dir, "note.md")); got == "# 标题正文" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("file = %q, want the merged document", mustRead(t, filepath.Join(dir, "note.md")))
+}
+
+// A real Backspace on the buffer's first cell runs the same merge as joinUp.
+func TestBackspaceKeyMergesAndSaves(t *testing.T) {
+	dir, _ := writeNote(t)
+	a := newApp("", dir)
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	app.Press("backspace")
+
+	if got, want := a.text(), "# 标题正文"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		app.Render()
+		if mustRead(t, filepath.Join(dir, "note.md")) == "# 标题正文" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("file = %q after the merge", mustRead(t, filepath.Join(dir, "note.md")))
+}
+
+// Enter at the start of a block leaves an empty line above instead of doing
+// nothing, which is what the key does in Typora.
+func TestEnterAtTheStartOfABlockAddsALineAbove(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.newLine()
+
+	if got, want := a.buffer(), "\n正文"; got != want {
+		t.Fatalf("block = %q, want %q", got, want)
+	}
+	if got, want := a.dirty, true; got != want {
+		t.Fatalf("dirty = %v, want %v", got, want)
 	}
 }

@@ -34,8 +34,10 @@ open or write (message on stderr).
 
 | Chord | Action |
 | --- | --- |
-| `Enter` | Continue a list item, or start a new block |
+| `Enter` | Continue a list item, start a new block, or add an empty line |
 | `Shift+Enter` | Line break inside the same block |
+| `Ctrl+V` | Paste text, files or a screenshot: pictures are copied into `assets/` and shown, other files become links |
+| `Backspace` / `Delete` at a block edge | Merge that block with its neighbour |
 | `Esc` | Commit the active block |
 | `Ctrl+S` | Save |
 | `Ctrl+P` | Toggle the full-screen preview |
@@ -53,6 +55,18 @@ open or write (message on stderr).
 
 The chords follow Typora's defaults, so muscle memory carries over.
 
+## Pictures
+
+A pasted or referenced picture is stored in an `assets/` folder next to the
+document, so a note and its images travel together:
+
+```markdown
+![shot.png](assets/shot.png)
+```
+
+The renderer reads local files only; a remote `https://` source is ignored
+instead of being fetched, so opening a note never reaches the network.
+
 ## Use it as git's editor
 
 ```sh
@@ -69,6 +83,25 @@ go test ./...       # UI tests run headless through keel's windowtest
 gofmt -l .          # .githooks/pre-commit checks this, plus vet and test
 ```
 
+`windowtest` synthesises keys but never touches the real keyboard or clipboard,
+so the parts that depend on the OS are checked with keel's own automation
+server, `keel-mcp` (installed by `go install
+github.com/dyike/keel/cmd/keel-mcp@v0.4.11`, configured in
+[`.pi/mcp.json`](.pi/mcp.json)):
+
+```sh
+go build -o .tmp/vibemark.exe .
+# then, through the MCP tools:
+#   launch  {"command": "…/.tmp/vibemark.exe --dir .tmp/demo"}
+#   click   {"text": "正文"}
+#   press_key {"key": "backspace"}
+#   press_key {"key": "ctrl+v"}
+```
+
+It drives the real window off-screen (or with `visible: true`), so cross-block
+deleting, clipboard pasting and autosave are verified end to end instead of
+being assumed.
+
 Enable the hooks once per clone: `git config core.hooksPath .githooks`.
 
 Design records live in [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.md),
@@ -82,5 +115,9 @@ Design records live in [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.
 - Undo covers the active block only.
 - A click selects a block, not a character position inside it; click inside the
   opened block to place the caret.
-- No system file dialog, no file drag-and-drop, and no images: keel v0.4.11
-  offers none of them on desktop.
+- No system file dialog and no file drag-and-drop: keel v0.4.11 offers neither
+  on desktop, so a picture arrives through the clipboard.
+- Every active block carries an invisible `U+200B` guard at both ends; the
+  buffer's API has no selection setter, so removing the guard is the only
+  signal that Backspace crossed a block edge. The characters are stripped
+  before anything is written.

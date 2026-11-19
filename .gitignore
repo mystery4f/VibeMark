@@ -13,3 +13,9 @@
 # keel build outputs (from the scaffold .gitignore)
 /dist/
 *.syso
+
+# ~/.gitignore_global:26 ignores .pi/. The automation setup is part of the
+# project: keel-mcp drives the real window for key, paste and screenshot checks.
+!.pi/
+.pi/tasks/
+!.pi/mcp.json
