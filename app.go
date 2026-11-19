@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"io/fs"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dyike/keel/ui/core"
@@ -13,12 +14,10 @@ import (
 	"github.com/dyike/keel/ui/kit"
 	"github.com/dyike/keel/ui/markdown"
 	"github.com/dyike/keel/ui/theme"
-
 	"github.com/mystery4f/vibemark/internal/mddoc"
 	"github.com/mystery4f/vibemark/internal/workspace"
 )
 
-// appMode is which of the two shapes the window shows.
 type appMode int
 
 const (
@@ -26,8 +25,15 @@ const (
 	modeSingle                   // one file, no tree
 )
 
-// emptyHint is the zero-data text a workspace shows before a file is open.
-const emptyHint = "这个目录里还没有 Markdown 文件"
+const (
+	// emptyHint is the zero-data text a workspace shows before a file is open.
+	emptyHint = "这个目录里还没有 Markdown 文件"
+	// lineHeight is one editor row in dp: kit.CodeEditor draws TextMd (13sp)
+	// at 1.5 line height.
+	lineHeight = 20
+	// saveDelay is how long typing rests before a working directory writes.
+	saveDelay = 300 * time.Millisecond
+)
 
 // appState is what keel persists between runs through KeepState.
 type appState struct {
@@ -35,7 +41,8 @@ type appState struct {
 	Path string
 }
 
-// app is the whole window: one editor, one optional tree, one status bar.
+// app is the whole window: a column of blocks, one of which is the editor, an
+// optional tree, and a status bar.
 type app struct {
 	state appState
 
@@ -51,6 +58,15 @@ type app struct {
 
 	hasFiles bool // the working directory holds at least one markdown file
 
+	// The document is shown as top-level blocks: a block renders as markdown
+	// until the caret enters it, and then as its own source.
+	doc    string
+	blocks []mddoc.Block
+	docs   []*markdown.Doc
+
+	active        int    // index of the block being edited, -1 when none
+	before, after string // the text before and after the active block
+
 	saved       string
 	dirty       bool
 	previewing  bool
@@ -65,7 +81,7 @@ type app struct {
 // newApp builds the app for one file (path) or one directory (dir). Exactly one
 // of them is non-empty when the command line named it.
 func newApp(path, dir string) *app {
-	a := &app{path: path, dir: dir, bar: kit.StatusBar(), preview: markdown.New("")}
+	a := &app{path: path, dir: dir, bar: kit.StatusBar(), preview: markdown.New(""), active: -1}
 	if path != "" {
 		a.mode = modeSingle
 	} else {
@@ -84,7 +100,6 @@ func (a *app) once() {
 
 	a.editor = kit.CodeEditor("").
 		Language("markdown").
-		Fill().
 		SoftWrap(true).
 		AutoClose(true).
 		OnChange(a.changed)
@@ -125,14 +140,22 @@ func (a *app) openFile() {
 	a.status = ""
 }
 
-// load makes content the saved text and shows it in the editor.
+// load makes content the saved text of the window.
 func (a *app) load(content string) {
 	a.saved = content
 	a.dirty = false
 	a.editor.Name(filepath.Base(a.path))
-	a.editor.SetValue(content)
-	a.editor.SetCursor(0, 0)
-	a.applyDecorations(content)
+	a.editor.SetValue("")
+	a.split(content)
+}
+
+// split refills the block list and drops the rendered markdown of the old one.
+func (a *app) split(content string) {
+	a.active = -1
+	a.before, a.after = "", ""
+	a.doc = content
+	a.blocks = mddoc.Blocks(content)
+	a.docs = make([]*markdown.Doc, len(a.blocks))
 }
 
 // loadDir scans the directory into the tree and opens its first file.
@@ -150,8 +173,10 @@ func (a *app) loadDir() {
 	}
 }
 
-// open switches the editor to the file the tree selected.
+// open switches the window to the file the tree selected, saving pending edits
+// of the current one first.
 func (a *app) open(path string) {
+	a.commit()
 	content, err := workspace.Read(path)
 	if err != nil {
 		a.fail(userError("打开", filepath.Base(path), err))
@@ -161,10 +186,73 @@ func (a *app) open(path string) {
 	a.load(content)
 }
 
+// text is the whole document as it stands, including the block under the caret.
+func (a *app) text() string {
+	if a.active < 0 {
+		return a.doc
+	}
+	return a.before + a.editor.Value() + a.after
+}
+
+// activate puts the caret in block i: the block swaps to its own source and the
+// rest of the document keeps rendering as markdown.
+func (a *app) activate(i int) {
+	if i < 0 || i >= len(a.blocks) {
+		return
+	}
+	if a.active == i {
+		a.editor.Focus()
+		return
+	}
+	a.commit()
+	block := a.blocks[i]
+	a.before, a.after = a.doc[:block.Start], a.doc[block.End:]
+	a.active = i
+	a.editor.Name(filepath.Base(a.path))
+	a.editor.SetValue(block.Text(a.doc))
+	a.editor.SetCursor(0, 0)
+	a.editor.Focus()
+	a.pending = true
+}
+
+// commit writes the edited block back into the document and re-splits it.
+func (a *app) commit() {
+	if a.active < 0 {
+		return
+	}
+	a.doc = a.before + a.editor.Value() + a.after
+	a.active = -1
+	a.before, a.after = "", ""
+	a.split(a.doc)
+}
+
+// appendBlock adds an empty paragraph at the end of the document and starts
+// editing it, so a reader can keep writing without hunting for a spot.
+func (a *app) appendBlock() {
+	a.commit()
+	if a.doc != "" && !strings.HasSuffix(a.doc, "\n\n") {
+		if strings.HasSuffix(a.doc, "\n") {
+			a.doc += "\n"
+		} else {
+			a.doc += "\n\n"
+		}
+	}
+	a.split(a.doc)
+	a.editor.SetValue("")
+	a.blocks = append(a.blocks, mddoc.Block{Start: len(a.doc), End: len(a.doc)})
+	a.docs = append(a.docs, nil)
+	a.active = len(a.blocks) - 1
+	a.before, a.after = a.doc, ""
+	a.editor.SetCursor(0, 0)
+	a.editor.Focus()
+	a.changed("")
+}
+
 // changed runs on every editor change. Decorations wait for the next frame so a
 // burst of keystrokes costs one parse.
 func (a *app) changed(text string) {
-	a.dirty = text != a.saved
+	full := a.text()
+	a.dirty = full != a.saved
 	a.pending = true
 	if a.mode == modeWorkspace {
 		a.scheduleSave()
@@ -178,7 +266,7 @@ func (a *app) scheduleSave() {
 		return
 	}
 	a.saveArmed = true
-	time.AfterFunc(300*time.Millisecond, func() {
+	time.AfterFunc(saveDelay, func() {
 		core.Update(func() {
 			a.saveArmed = false
 			if a.dirty {
@@ -188,17 +276,18 @@ func (a *app) scheduleSave() {
 	})
 }
 
-// save writes the editor text through a temporary file. A failure keeps the
-// dirty flag so the next attempt still has data to write.
+// save writes the document through a temporary file. A failure keeps the dirty
+// flag so the next attempt still has data to write.
 func (a *app) save() {
 	if a.path == "" {
 		return
 	}
-	if err := workspace.WriteAtomic(a.path, a.editor.Value()); err != nil {
+	full := a.text()
+	if err := workspace.WriteAtomic(a.path, full); err != nil {
 		a.fail(userError("保存", filepath.Base(a.path), err))
 		return
 	}
-	a.saved = a.editor.Value()
+	a.saved = full
 	a.dirty = false
 	a.status = ""
 	a.statusColor = nil
@@ -223,16 +312,19 @@ func (a *app) fail(msg string) {
 	a.statusColor = &c
 }
 
-// applyDecorations rebuilds the decoration set from the current source.
+// applyDecorations rebuilds the decoration set from the block being edited.
 func (a *app) applyDecorations(src string) {
 	if a.decor == nil {
 		return
 	}
 	a.decor.Clear()
+	if a.active < 0 {
+		return
+	}
 	a.decor.Append(mddoc.Decorations(src)...)
 }
 
-// Render draws the window: tree, editor or preview, then the status bar.
+// Render draws the window: tree, the column of blocks, then the status bar.
 func (a *app) Render(cx *el.Context) el.Element {
 	a.once()
 	if a.pending {
@@ -250,10 +342,10 @@ func (a *app) Render(cx *el.Context) el.Element {
 		body.Child(el.Div().Grow().HFull().P(24).Items(el.Start).Justify(el.Start).
 			Child(el.Text(emptyHint).TextColor(pal.Muted)))
 	case a.previewing:
-		a.preview.SetSource(a.editor.Value())
+		a.preview.SetSource(a.text())
 		body.Child(el.Div().Grow().HFull().ScrollY().P(24).Child(a.preview.Render(cx)))
 	default:
-		body.Child(el.Div().Grow().HFull().Child(a.editor.Render(cx)))
+		body.Child(a.column(cx))
 	}
 
 	bar := a.bar.Left(textView{text: a.title(), color: pal.Muted})
@@ -267,6 +359,43 @@ func (a *app) Render(cx *el.Context) el.Element {
 
 	root := el.Div().Col().WFull().HFull()
 	return root.Child(body, bar.Render(cx))
+}
+
+// column draws every block in order: the active one as source, the rest as
+// rendered markdown, with a trailing strip that starts a new paragraph.
+func (a *app) column(cx *el.Context) el.Element {
+	pal := theme.Current()
+	col := el.Div().Col().Grow().HFull().ScrollY().Px(24).Py(20).Gap(10)
+	for i := range a.blocks {
+		if i == a.active {
+			col.Child(el.Div().WFull().Child(a.activeEditor(cx)))
+			continue
+		}
+		col.Child(a.blockView(cx, i, pal))
+	}
+	if len(a.blocks) == 0 {
+		col.Child(el.Div().WFull().P(8).OnClick(a.appendBlock).
+			Child(el.Text("点这里开始写").TextColor(pal.Muted)))
+	}
+	col.Child(el.Div().WFull().H(el.Dp(64)).OnClick(a.appendBlock))
+	return col
+}
+
+// blockView renders one untouched block as markdown inside a press target.
+func (a *app) blockView(cx *el.Context, i int, pal theme.Palette) el.Element {
+	block := a.blocks[i]
+	if a.docs[i] == nil {
+		a.docs[i] = markdown.New(block.Text(a.doc))
+	}
+	return el.Div().WFull().OnClick(func() { a.activate(i) }).
+		Child(a.docs[i].Render(cx))
+}
+
+// activeEditor draws the block under the caret at its own height.
+func (a *app) activeEditor(cx *el.Context) el.Element {
+	lines := strings.Count(a.editor.Value(), "\n") + 1
+	height := float32(lines*lineHeight + 24)
+	return el.Div().WFull().Child(a.editor.Height(height).Render(cx))
 }
 
 // title is the path shown at the left of the status bar.
@@ -309,7 +438,8 @@ func (a *app) shortcuts() map[string]func() {
 		"ctrl+e":               func() { a.wrap("`", "`") },
 		"ctrl+k":               func() { a.wrap("[", "](url)") },
 		"ctrl+s":               a.save,
-		"ctrl+p":               func() { a.previewing = !a.previewing },
+		"ctrl+p":               func() { a.commit(); a.previewing = !a.previewing },
+		"esc":                  a.commit,
 		"ctrl+1":               func() { a.prefix("# ") },
 		"ctrl+2":               func() { a.prefix("## ") },
 		"ctrl+3":               func() { a.prefix("### ") },
@@ -319,8 +449,11 @@ func (a *app) shortcuts() map[string]func() {
 	}
 }
 
-// wrap toggles an inline marker around the selection.
+// wrap toggles an inline marker around the selection of the block being edited.
 func (a *app) wrap(open, close string) {
+	if a.active < 0 {
+		return
+	}
 	line, col := a.editor.Cursor()
 	src := a.editor.Value()
 	out, caret := mddoc.WrapSel(src, mddoc.Pos{Line: line, Col: col}, a.editor.Selection(), open, close)
@@ -329,6 +462,9 @@ func (a *app) wrap(open, close string) {
 
 // prefix sets the block marker of the caret's line.
 func (a *app) prefix(marker string) {
+	if a.active < 0 {
+		return
+	}
 	line, col := a.editor.Cursor()
 	out, caret := mddoc.PrefixLine(a.editor.Value(), mddoc.Pos{Line: line, Col: col}, marker)
 	a.replace(out, caret)

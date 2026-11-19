@@ -96,3 +96,34 @@ func write(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestCaptureActiveBlock renders the one state a screenshot can review: a block
+// open as its own source with the rest of the document still laid out.
+func TestCaptureActiveBlock(t *testing.T) {
+	out := os.Getenv("VIBEMARK_RENDERS")
+	if out == "" {
+		t.Skip("set VIBEMARK_RENDERS to a directory to capture renders")
+	}
+	notes := filepath.Join(t.TempDir(), "note.md")
+	write(t, notes, "# 标题\n\n正文里 **粗体** 与 *斜体*，还有 `代码`。\n\n- [x] 已完成\n- [ ] 待办\n\n> 引用\n")
+
+	a := newApp(notes, "")
+	app := windowtest.New(t, window.Options{
+		Title:     "VibeMark",
+		Width:     1024,
+		Height:    768,
+		Content:   el.Root(a),
+		KeepState: &a.state,
+		Shortcuts: a.shortcuts(),
+	})
+	app.Render()
+	a.activate(1)
+	app.Render()
+	png := app.Screenshot()
+	if len(png) == 0 {
+		t.Fatal("empty screenshot")
+	}
+	if err := os.WriteFile(filepath.Join(out, "single-file-active-block-1024x768.png"), png, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

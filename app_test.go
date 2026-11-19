@@ -93,3 +93,50 @@ func TestEditorIsNamedAfterTheFile(t *testing.T) {
 
 	app.Want("note.md")
 }
+
+// A rendered block swaps to its own source when it is pressed.
+func TestPressingABlockShowsItsSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "note.md")
+	if err := os.WriteFile(path, []byte("# 标题\n\n- 项目\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	app.Want("标题")
+	app.WantNot("# 标题")
+
+	app.Click("项目")
+	app.Want("- 项目")
+}
+
+// Leaving a block writes its source back into the document, so the whole file
+// keeps the edit.
+func TestCommittingABlockWritesBack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.md")
+	if err := os.WriteFile(path, []byte("# 标题\n\n正文\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+	a.once()
+
+	a.activate(1)
+	if got := a.editor.Value(); got != "正文" {
+		t.Fatalf("active block source = %q, want 正文", got)
+	}
+	a.editor.SetValue("改过的正文")
+	a.commit()
+
+	if want := "# 标题\n\n改过的正文\n"; a.doc != want {
+		t.Fatalf("document = %q, want %q", a.doc, want)
+	}
+	a.save()
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "# 标题\n\n改过的正文\n"; string(onDisk) != want {
+		t.Fatalf("file = %q, want %q", onDisk, want)
+	}
+}
