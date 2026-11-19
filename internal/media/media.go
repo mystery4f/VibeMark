@@ -4,7 +4,10 @@
 package media
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +42,30 @@ func Root() string {
 		temp = long
 	}
 	return filepath.Join(temp, "vibemark")
+}
+
+// Encode makes clipboard or file bytes readable by the markdown renderer, which
+// decodes PNG, JPEG, GIF and WebP. Windows hands over screenshots as a bitmap,
+// so a BMP is re-encoded as PNG and the returned name follows.
+func Encode(name string, data []byte) (string, []byte, error) {
+	if !strings.EqualFold(filepath.Ext(name), ".bmp") {
+		return name, data, nil
+	}
+	img, err := decodeBMP(data)
+	if err != nil {
+		return "", nil, err
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		return "", nil, err
+	}
+	return strings.TrimSuffix(name, filepath.Ext(name)) + ".png", out.Bytes(), nil
+}
+
+// DecodeBMP reads a bitmap, the one picture format the markdown renderer does
+// not decode itself.
+func DecodeBMP(data []byte) (image.Image, error) {
+	return decodeBMP(data)
 }
 
 // Copy copies src into root and returns the path markdown links to: absolute,

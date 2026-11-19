@@ -9,15 +9,17 @@ instead of a terminal buffer.
 
 ## How it renders
 
-Every top-level block is drawn by `ui/markdown`, so Markdown markers are gone and
-headings keep their real size. Clicking a block turns that one block into its
-source text; `Esc` (or clicking another block) puts it back. Only the block you
-are editing is ever shown as source.
+The document is one text editor. `internal/mddoc` turns the Markdown into
+decorations, so headings are bold in the accent colour, bold and italic text
+looks bold and italic, and the markers fade to 40% instead of disappearing.
+`Ctrl+P` shows the fully typeset page.
 
-This is the deliberate trade-off recorded in
-[`docs/adr/0002-block-editing-wysiwyg.md`](docs/adr/0002-block-editing-wysiwyg.md):
-keel decorations cannot hide characters or change glyph width, so true WYSIWYG
-needs a per-block editor rather than inline styling.
+The trade-off is recorded in
+[`docs/adr/0003-one-editor-with-decorations.md`](docs/adr/0003-one-editor-with-decorations.md):
+keel decorations cannot hide characters or change glyph width, so headings keep
+the body size and the markers stay visible. Keeping one editor keeps typing,
+undo, selection and input methods native, which matters more than exact
+typography.
 
 ## Modes
 
@@ -34,14 +36,9 @@ open or write (message on stderr).
 
 | Chord | Action |
 | --- | --- |
-| `Enter` | Continue a list item, start a new block, or add an empty line |
-| `Shift+Enter` | Line break inside the same block |
-| `Ctrl+V` | Paste text, files or a screenshot: pictures are copied into `assets/` and shown, other files become links |
-| `Backspace` / `Delete` at a block edge | Merge that block with its neighbour |
-| `Esc` | Commit the active block |
+| `Ctrl+V` | Paste text, files or a screenshot: pictures are copied into the temp folder and shown, other files become links |
 | `Ctrl+S` | Save |
 | `Ctrl+P` | Toggle the full-screen preview |
-| `Ctrl+/` | Toggle source mode for the whole document |
 | `Ctrl+Shift+L` | Toggle the file tree |
 | `Ctrl+B` / `Ctrl+I` | Bold / italic around the selection |
 | ``Ctrl+Shift+` `` | Inline code around the selection |
@@ -53,7 +50,9 @@ open or write (message on stderr).
 | `Ctrl+Shift+Q` | Blockquote |
 | `Ctrl+Shift+[` / `Ctrl+Shift+]` | Ordered / bullet list |
 
-The chords follow Typora's defaults, so muscle memory carries over.
+The chords follow Typora's defaults, so muscle memory carries over. Typing,
+`Enter`, `Shift+Enter`, `Backspace`, `Delete`, `Ctrl+A` and `Ctrl+Z` are the
+editor's own, so they behave the way they do in any text box.
 
 ## Pictures
 
@@ -116,13 +115,11 @@ Design records live in [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.
 
 ## Known limits
 
-- The paragraph you are editing shows its source, with line numbers, while the
-  rest of the document stays typeset.
-- The paragraph you are editing scrolls inside its own box once it grows past
-  the window height.
-- Undo covers the paragraph you are editing.
-- A click opens a paragraph; click again to put the caret where you want it.
+- Markers stay visible, only faded, and headings keep the body size: keel
+  decorations cannot hide characters or change glyph width.
+- The line-number gutter and the scrollbar belong to the editor widget and
+  cannot be switched off.
+- A command that rewrites the document (bold, heading, code fence) restarts the
+  undo history, because the editor exposes no way to write its buffer.
 - Pictures arrive through the clipboard only: there is no file dialog and no
   drag and drop.
-- Select all takes two presses: the first picks the paragraph, the second picks
-  the whole file, and the next keystroke replaces it.

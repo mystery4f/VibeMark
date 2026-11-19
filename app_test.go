@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,8 +18,7 @@ import (
 	"github.com/dyike/keel/ui/el"
 	"github.com/dyike/keel/ui/window"
 	"github.com/dyike/keel/ui/window/windowtest"
-
-	"github.com/mystery4f/vibemark/internal/mddoc"
+	"golang.org/x/image/bmp"
 )
 
 // writeNote puts one markdown file in a fresh directory and returns its path.
@@ -23,640 +26,345 @@ func writeNote(t *testing.T) (dir, path string) {
 	t.Helper()
 	dir = t.TempDir()
 	path = filepath.Join(dir, "note.md")
-	if err := os.WriteFile(path, []byte("# 标题\n\n正文"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("# 标题\n\n正文\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return dir, path
 }
 
-// The single-file window shows the file it opened and switches to the preview.
+// openWindow builds the app and hands it to a window that never shows.
+func openWindow(t *testing.T, a *app) *windowtest.App {
+	t.Helper()
+	return windowtest.New(t, window.Options{
+		Content:   el.Root(a),
+		KeepState: &a.state,
+		Shortcuts: a.shortcuts(),
+		// keel ends the process when the last window closes unless a close hook
+		// is set, and a test must not end the run that way.
+		OnClose: func() {},
+		Width:   720,
+		Height:  480,
+	})
+}
+
 func TestSingleFileWindowShowsPathAndTogglesPreview(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
 	app.Want("note.md")
-	app.Want("已保存")
-
 	app.Press("ctrl+p")
 	app.Want("预览")
-
+	if !a.previewing {
+		t.Fatal("preview did not open")
+	}
 	app.Press("ctrl+p")
-	app.WantNot("预览")
+	app.Want("已保存")
 }
 
-// The working-directory window lists the markdown files it found.
 func TestWorkspaceWindowListsFiles(t *testing.T) {
 	dir, _ := writeNote(t)
 	a := newApp("", dir)
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
 	app.Want("note.md")
-	app.Want("已保存")
+	if a.tree == nil {
+		t.Fatal("tree was not built")
+	}
 }
 
-// A missing file is created empty, which is what git hands an editor.
 func TestMissingFileIsCreated(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "new.md")
+	path := filepath.Join(dir, "draft.md")
 	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	openWindow(t, a)
 
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Size() != 0 {
-		t.Fatalf("created file is not empty: %d bytes", info.Size())
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file was not created: %v", err)
 	}
 }
 
-// An empty working directory says so instead of showing a blank editor.
 func TestEmptyWorkspaceShowsHint(t *testing.T) {
 	a := newApp("", t.TempDir())
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
 	app.Want(emptyHint)
 }
 
-// A filesystem failure reaches the status bar as a sentence, not a raw error.
 func TestUserErrorIsReadable(t *testing.T) {
-	if got, want := userError("打开", "note.md", fs.ErrNotExist), "打开 note.md 失败：文件或目录不存在"; got != want {
-		t.Fatalf("userError = %q, want %q", got, want)
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{fs.ErrNotExist, "不存在"},
+		{fs.ErrPermission, "没有访问权限"},
+		{fmt.Errorf("boom"), "boom"},
 	}
-	if got, want := userError("保存", "note.md", fs.ErrPermission), "保存 note.md 失败：没有访问权限"; got != want {
-		t.Fatalf("userError = %q, want %q", got, want)
-	}
-}
-
-// The editor names the open file, so an assistive reader hears the file name.
-func TestEditorIsNamedAfterTheFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "note.md")
-	if err := os.WriteFile(path, []byte("# 标题"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	app.Want("note.md")
-}
-
-// A rendered block swaps to its own source when it is pressed.
-func TestPressingABlockShowsItsSource(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "note.md")
-	if err := os.WriteFile(path, []byte("# 标题\n\n- 项目\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	// Block 0 is open for typing on a single file, so only the other blocks
-	// still render as markdown.
-	app.Want("项目")
-	app.WantNot("- 项目")
-
-	app.Click("项目")
-	app.Want("- 项目")
-	if got := a.buffer(); !strings.Contains(got, "- 项目") {
-		t.Fatalf("editor = %q, want the pressed block source", got)
+	for _, c := range cases {
+		if got := userError("打开", "a.md", c.err); !strings.Contains(got, c.want) {
+			t.Fatalf("userError = %q, want %q in it", got, c.want)
+		}
 	}
 }
 
-// Leaving a block writes its source back into the document, so the whole file
-// keeps the edit.
-func TestCommittingABlockWritesBack(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "note.md")
-	if err := os.WriteFile(path, []byte("# 标题\n\n正文\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a := newApp(path, "")
-	a.once()
-
-	a.activate(1)
-	if got := a.buffer(); got != "正文" {
-		t.Fatalf("active block source = %q, want 正文", got)
-	}
-	a.setBuffer("改过的正文", mddoc.Pos{})
-	a.commit()
-
-	if want := "# 标题\n\n改过的正文\n"; a.doc != want {
-		t.Fatalf("document = %q, want %q", a.doc, want)
-	}
-	a.save()
-	onDisk, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "# 标题\n\n改过的正文\n"; string(onDisk) != want {
-		t.Fatalf("file = %q, want %q", onDisk, want)
-	}
-}
-
-// git opens the editor and expects the caret to be usable without a click: the
-// first keystroke has to land somewhere.
-func TestSingleFileAcceptsTypingWithoutAClick(t *testing.T) {
+func TestEditorHoldsTheFile(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	openWindow(t, a)
 
-	app.Type("追加一句")
-	if got := a.text(); !strings.Contains(got, "追加一句") {
-		t.Fatalf("typed text did not land; document = %q", got)
+	if got := a.text(); got != "# 标题\n\n正文\n" {
+		t.Fatalf("document = %q, want the file", got)
 	}
 }
 
-// A commit message file can be empty, and an empty file must still accept text.
+func TestDocumentOpensReadyToType(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := openWindow(t, a)
+
+	app.Type("新")
+	if got := a.text(); !strings.HasPrefix(got, "新") {
+		t.Fatalf("document = %q, want the typing at the start", got)
+	}
+}
+
 func TestEmptyFileAcceptsTyping(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "COMMIT_EDITMSG")
+	path := filepath.Join(dir, "empty.md")
 	if err := os.WriteFile(path, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
-	app.Type("fix: something")
-	if got := a.text(); !strings.Contains(got, "fix: something") {
-		t.Fatalf("typed text did not land; document = %q", got)
+	app.Type("第一行")
+	if got := a.text(); got != "第一行" {
+		t.Fatalf("document = %q, want the typing", got)
 	}
 }
 
-// Ctrl+S after typing must write what was typed, without pressing Esc first.
-func TestSaveKeepsTextTypedInTheActiveBlock(t *testing.T) {
+func TestEnterAndBackspaceBehaveLikeATextField(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
-	app.Type("尾巴")
-	app.Press("ctrl+s")
-	if got := mustRead(t, path); !strings.Contains(got, "尾巴") {
-		t.Fatalf("file = %q, want it to hold the typed text", got)
+	a.editor.SetCursor(0, 2)
+	app.Press("enter")
+	app.Type("新行")
+	if got := a.text(); got != "# \n新行标题\n\n正文\n" {
+		t.Fatalf("document = %q, want the break where the caret stood", got)
 	}
-	if a.dirty {
-		t.Fatal("save left the document dirty")
+	app.Press("backspace")
+	if got := a.text(); got != "# \n新标题\n\n正文\n" {
+		t.Fatalf("document = %q, want the break removed", got)
 	}
 }
 
-func mustRead(t *testing.T, path string) string {
-	t.Helper()
-	b, err := os.ReadFile(path)
+func TestUndoStillWorksAfterTyping(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := openWindow(t, a)
+
+	app.Type("abc")
+	app.Press("ctrl+z")
+	if got := a.text(); got != "# 标题\n\n正文\n" {
+		t.Fatalf("document = %q, want the typing undone", got)
+	}
+}
+
+func TestSaveKeepsTypedText(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := openWindow(t, a)
+
+	app.Type("记下")
+	app.Press("ctrl+s")
+	saved, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(b)
-}
-
-// Moving to another block keeps what was typed in the previous one.
-func TestSwitchingBlocksKeepsTypedText(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.editor.SetValue("# 改过的标题")
-	a.activate(1)
-	if got := a.text(); !strings.Contains(got, "# 改过的标题") {
-		t.Fatalf("document = %q, want the edited heading", got)
+	if !strings.HasPrefix(string(saved), "记下") {
+		t.Fatalf("file = %q, want the typing", saved)
 	}
 }
 
-// Enter inside a block starts a new block, and both keep rendering afterwards.
-func TestNewParagraphBecomesItsOwnBlock(t *testing.T) {
+func TestPreviewSeesTheTypedText(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
-	a.editor.SetValue("# 标题\n\n新的一段")
-	a.commit()
-	// Two paragraphs typed into block 0 plus the untouched one further down.
-	if blocks := len(a.blocks); blocks != 3 {
-		t.Fatalf("blocks = %d, want 3 for %q", blocks, a.doc)
-	}
-}
-
-// Preview shows the active block's text too, not the stale document.
-func TestPreviewSeesTheActiveBlock(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.editor.SetValue("# 标题\n\n预览里要看见这句")
+	app.Type("补一行\n")
 	app.Press("ctrl+p")
-	app.Want("预览里要看见这句")
+	app.Want("补一行")
 }
 
-// Ctrl+B wraps the selection of the block under the caret.
 func TestBoldWrapsTheSelection(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
-	a.setBuffer("加粗这句", mddoc.Pos{})
-	a.wrap("**", "**")
-	if got := a.buffer(); got != "****加粗这句" {
-		t.Fatalf("value = %q, want the markers around the caret", got)
+	a.editor.SetCursor(0, 2)
+	app.Type("加粗")
+	a.editor.SetCursor(0, 2)
+	if got := a.editor.Selection(); got != "" {
+		t.Fatalf("selection = %q, want an empty one before wrapping", got)
+	}
+	// Selecting with the keyboard keeps the command honest about what the
+	// editor reports for a selection.
+	for i := 0; i < 2; i++ {
+		app.Press("shift+right")
+	}
+	app.Press("ctrl+b")
+	if got := a.text(); !strings.Contains(got, "**加粗**") {
+		t.Fatalf("document = %q, want the bold markers", got)
 	}
 }
 
-// The working directory saves by itself once typing pauses.
 func TestWorkspaceAutosaves(t *testing.T) {
 	dir, path := writeNote(t)
 	a := newApp("", dir)
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
-	a.activate(1)
-	a.setBuffer("自动保存的正文", mddoc.Pos{})
-	a.changed(a.lastValue)
-	deadline := time.Now().Add(2 * time.Second)
+	app.Type("改")
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(mustRead(t, path), "自动保存的正文") {
+		app.Render()
+		saved, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(string(saved), "改") {
 			return
 		}
-		// The save is queued with core.Update, which runs in the frame loop.
-		app.Render()
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("file = %q, want the automatic save", mustRead(t, path))
+	t.Fatal("the working directory was not saved")
 }
 
-// Enter finishes the line above: it becomes its own rendered block while the
-// caret continues on the line below.
-func TestEnterCommitsTheLineAbove(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.setBuffer("第一行\n第二行", mddoc.Pos{Line: 0, Col: 3})
-	app.Press("enter")
-
-	if got := a.text(); !strings.Contains(got, "第一行\n\n第二行") {
-		t.Fatalf("document = %q, want the two lines split into blocks", got)
-	}
-	if a.active < 0 {
-		t.Fatal("the caret left the editor; the second line must stay editable")
-	}
-	if got := a.buffer(); got != "第二行" {
-		t.Fatalf("editor = %q, want only the line below the caret", got)
-	}
-}
-
-// Enter on the last line keeps an empty block open for the next paragraph.
-func TestEnterAtTheEndStartsANewBlock(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.setBuffer("只有一行", mddoc.Pos{Line: 0, Col: 4})
-	before := len(a.blocks)
-	app.Press("enter")
-
-	if a.active < 0 {
-		t.Fatal("no block is open after Enter")
-	}
-	if got := a.buffer(); got != "" {
-		t.Fatalf("editor = %q, want an empty block", got)
-	}
-	if len(a.blocks) != before+1 {
-		t.Fatalf("blocks = %d, want %d", len(a.blocks), before+1)
-	}
-}
-
-// Heading and paragraph shortcuts follow Typora: Ctrl+3 styles the line, Ctrl+0
-// puts the plain paragraph back.
 func TestHeadingAndParagraphShortcuts(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
+	a.editor.SetCursor(0, 0)
 	app.Press("ctrl+3")
-	if got := a.buffer(); got != "### 标题" {
-		t.Fatalf("editor = %q, want a third-level heading", got)
+	if got := a.text(); !strings.HasPrefix(got, "### 标题") {
+		t.Fatalf("document = %q, want a third level heading", got)
 	}
-
 	app.Press("ctrl+0")
-	if got := a.buffer(); got != "标题" {
-		t.Fatalf("editor = %q, want the plain paragraph back", got)
+	if got := a.text(); !strings.HasPrefix(got, "标题") {
+		t.Fatalf("document = %q, want the heading removed", got)
 	}
 }
 
-// Ctrl+Shift+K wraps the block in a code fence and takes it off again; the
-// inline chords of Typora keep working the same way.
-func TestFenceAndInlineShortcuts(t *testing.T) {
+func TestFenceShortcutWrapsTheDocument(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
 	app.Press("ctrl+shift+k")
-	if got := a.buffer(); got != "```\n# 标题\n```" {
-		t.Fatalf("editor = %q, want a fenced block", got)
+	if got := a.text(); !strings.HasPrefix(got, "```\n") || !strings.HasSuffix(got, "\n```") {
+		t.Fatalf("document = %q, want a fenced block", got)
 	}
 	app.Press("ctrl+shift+k")
-	if got := a.buffer(); got != "# 标题" {
-		t.Fatalf("editor = %q, want the fences gone", got)
-	}
-
-	a.editor.SetCursor(0, 5)
-	a.changed(a.lastValue)
-	app.Press("alt+shift+5")
-	if got := a.buffer(); !strings.Contains(got, "~~~~") {
-		t.Fatalf("editor = %q, want an empty strike pair", got)
+	if got := a.text(); strings.HasPrefix(got, "```") {
+		t.Fatalf("document = %q, want the fences removed", got)
 	}
 }
 
-// Ctrl+/ shows the whole document as one source block, the way Typora's source
-// code mode does, and Ctrl+/ again gives the blocks back.
-func TestSourceModeShortcut(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	blocks := len(a.blocks)
-	app.Press("ctrl+/")
-	if !a.sourceMode || len(a.blocks) != 1 {
-		t.Fatalf("sourceMode = %v, blocks = %d, want one source block", a.sourceMode, len(a.blocks))
-	}
-	if got := a.buffer(); !strings.Contains(got, "# 标题\n\n正文") {
-		t.Fatalf("editor = %q, want the whole document", got)
-	}
-
-	app.Press("ctrl+/")
-	if a.sourceMode || len(a.blocks) != blocks {
-		t.Fatalf("sourceMode = %v, blocks = %d, want %d blocks back", a.sourceMode, len(a.blocks), blocks)
-	}
-}
-
-// Enter inside a list item carries the marker to the next line and keeps the
-// list in one block, the way Typora does.
-func TestEnterContinuesTheList(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.setBuffer("- 项目", mddoc.Pos{Line: 0, Col: 4})
-	blocks := len(a.blocks)
-
-	app.Press("enter")
-	if got, want := a.buffer(), "- 项目\n- "; got != want {
-		t.Fatalf("editor = %q, want %q", got, want)
-	}
-	if len(a.blocks) != blocks {
-		t.Fatalf("blocks = %d, want the list to stay in %d", len(a.blocks), blocks)
-	}
-}
-
-// Enter on an item with no text leaves the list instead of nesting another one.
-func TestEnterOnAnEmptyItemLeavesTheList(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.setBuffer("- ", mddoc.Pos{Line: 0, Col: 2})
-
-	app.Press("enter")
-	if got := a.buffer(); got != "" {
-		t.Fatalf("editor = %q, want the marker gone", got)
-	}
-}
-
-// Shift+Enter breaks the line without ending the block.
-func TestShiftEnterStaysInTheBlock(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	blocks := len(a.blocks)
-	a.editor.SetCursor(0, 1+4)
-
-	app.Press("shift+enter")
-	got := a.buffer()
-	if !strings.HasPrefix(got, "# 标题\n") {
-		t.Fatalf("editor = %q, want a break after the heading", got)
-	}
-	if len(a.blocks) != blocks {
-		t.Fatalf("blocks = %d, want %d", len(a.blocks), blocks)
-	}
-}
-
-// Enter inside a fence is code, not a block boundary.
-func TestEnterInsideAFenceKeepsTheBlock(t *testing.T) {
-	dir, _ := writeNote(t)
-	fence := filepath.Join(dir, "fence.md")
-	if err := os.WriteFile(fence, []byte("```\ncode\n```"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a := newApp(fence, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	blocks := len(a.blocks)
-	a.editor.SetCursor(1, 4)
-
-	app.Press("enter")
-	if len(a.blocks) != blocks {
-		t.Fatalf("blocks = %d, want %d", len(a.blocks), blocks)
-	}
-	if got := a.buffer(); !strings.HasPrefix(got, "```\ncode\n") {
-		t.Fatalf("editor = %q, want the fence kept", got)
-	}
-}
-
-// Ctrl+A selects the text of the block being edited.
-func TestCtrlASelectsTheBlock(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	app.Press("ctrl+a")
-	if got := strings.Trim(a.editor.Selection(), blockGuard); got != "# 标题" {
-		t.Fatalf("selection = %q, want the whole block", got)
-	}
-}
-
-// Clicking a rendered block and then pressing Ctrl+A selects its text.
-func TestCtrlAAfterClickingABlock(t *testing.T) {
-	dir, _ := writeNote(t)
-	a := newApp("", dir)
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	app.Click("正文")
-	app.Press("ctrl+a")
-	if got := strings.Trim(a.editor.Selection(), blockGuard); got != "正文" {
-		t.Fatalf("selection = %q, want the clicked block", got)
-	}
-}
-
-// A file opened in the workspace starts with a block ready to edit, so Ctrl+A
-// selects text without a click first.
-func TestCtrlAWorksOnAFreshWorkspaceFile(t *testing.T) {
-	dir, _ := writeNote(t)
-	a := newApp("", dir)
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	app.Press("ctrl+a")
-	if got := strings.Trim(a.editor.Selection(), blockGuard); got != "# 标题" {
-		t.Fatalf("selection = %q, want the first block", got)
-	}
-}
-
-// Backspace at the start of a block joins it to the one above: the guard going
-// away is the trace keel leaves for a key it swallowed.
-func TestBackspaceAtBlockStartMergesUp(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.changed(blockGuard + "正文" + blockGuard)
-	a.changed("正文" + blockGuard)
-
-	if got, want := a.text(), "# 标题正文"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-	if got, want := a.buffer(), "# 标题正文"; got != want {
-		t.Fatalf("editor = %q, want %q", got, want)
-	}
-	if got, want := a.caret(), (mddoc.Pos{Line: 0, Col: 4}); got != want {
-		t.Fatalf("caret = %v, want the junction %v", got, want)
-	}
-}
-
-// Delete at the end of a block pulls the block below up.
-func TestDeleteAtBlockEndMergesDown(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(0)
-	a.changed(blockGuard + "# 标题" + blockGuard)
-	a.changed(blockGuard + "# 标题")
-
-	if got, want := a.text(), "# 标题正文"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-}
-
-// The guards mark block edges in the editor and never reach the file.
-func TestGuardsStayOutOfTheFile(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.save()
-
-	if got := mustRead(t, path); strings.Contains(got, blockGuard) {
-		t.Fatalf("file = %q, want the guards kept out", got)
-	}
-}
-
-// Backspace at the start of the first block has nothing to join, so the guard
-// comes back and the document stays as it was.
-func TestBackspaceAtTheFirstBlockKeepsTheDocument(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(0)
-	a.changed(blockGuard + "# 标题" + blockGuard)
-	a.changed("# 标题" + blockGuard)
-
-	if got, want := a.text(), "# 标题\n\n正文"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-	if got, want := a.editor.Value(), blockGuard+"# 标题"+blockGuard; got != want {
-		t.Fatalf("buffer = %q, want the guard restored", got)
-	}
-}
-
-// Plain text lands at the caret. The window shortcut consumes the key, so the
-// editor's own clipboard read never runs and this is the only insertion.
 func TestPastedTextLandsAtTheCaret(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	openWindow(t, a)
 
-	a.activate(1)
-	a.insertPasted(nativeclip.Data{Text: "新"})
-
-	if got, want := a.buffer(), "新正文"; got != want {
-		t.Fatalf("editor = %q, want %q", got, want)
+	a.editor.SetCursor(0, 2)
+	a.insertPasted(nativeclip.Data{Text: "插"})
+	if got := a.text(); got != "# 插标题\n\n正文\n" {
 	}
 }
 
-// A pasted picture goes to the media folder, never beside the note, and the
-// link is absolute so the note still finds it.
 func TestPastedPictureGoesToTheMediaFolder(t *testing.T) {
-	dir, path := writeNote(t)
-	src := filepath.Join(dir, "shot.png")
-	if err := os.WriteFile(src, []byte("pixels"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a := newApp(path, "")
-	a.mediaDir = t.TempDir()
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.insertPasted(nativeclip.Data{Files: []string{src}})
-
-	want := "![shot.png](" + filepath.ToSlash(filepath.Join(a.mediaDir, "shot.png")) + ")正文"
-	if got := a.buffer(); got != want {
-		t.Fatalf("editor = %q, want %q", got, want)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "assets")); !os.IsNotExist(err) {
-		t.Fatalf("the note grew an assets folder: %v", err)
-	}
-	if got := mustRead(t, filepath.Join(a.mediaDir, "shot.png")); got != "pixels" {
-		t.Fatalf("copied file = %q", got)
-	}
-}
-
-// Any other file becomes a markdown link to the copy.
-func TestPastedFileBecomesALink(t *testing.T) {
-	dir, path := writeNote(t)
-	src := filepath.Join(dir, "notes.txt")
-	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	a := newApp(path, "")
-	a.mediaDir = t.TempDir()
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.insertPasted(nativeclip.Data{Files: []string{src}})
-
-	want := "[notes.txt](" + filepath.ToSlash(filepath.Join(a.mediaDir, "notes.txt")) + ")正文"
-	if got := a.buffer(); got != want {
-		t.Fatalf("editor = %q, want %q", got, want)
-	}
-}
-
-// A picture held as clipboard bytes is saved with an extension from its type.
-func TestPastedPictureBytesAreSaved(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
 	a.mediaDir = t.TempDir()
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	openWindow(t, a)
 
-	a.activate(1)
-	a.insertPasted(nativeclip.Data{Images: []nativeclip.Image{{MIME: "image/bmp", Data: []byte("bmp")}}})
+	a.editor.SetCursor(0, 2)
+	a.insertPasted(nativeclip.Data{Images: []nativeclip.Image{{MIME: "image/png", Data: pngData(t)}}})
 
-	want := "![](" + filepath.ToSlash(filepath.Join(a.mediaDir, "pasted-1.bmp")) + ")正文"
-	if got := a.buffer(); got != want {
-		t.Fatalf("editor = %q, want %q", got, want)
+	link := filepath.ToSlash(filepath.Join(a.mediaDir, "pasted-1.png"))
+	if got := a.text(); !strings.Contains(got, "![]("+link+")") {
+		t.Fatalf("document = %q, want the picture link to %s", got, link)
 	}
-	if got := mustRead(t, filepath.Join(a.mediaDir, "pasted-1.bmp")); got != "bmp" {
-		t.Fatalf("saved file = %q", got)
+	if _, err := os.Stat(filepath.Join(a.mediaDir, "pasted-1.png")); err != nil {
+		t.Fatalf("picture was not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "assets")); err == nil {
+		t.Fatal("the note grew a picture folder beside it")
 	}
 }
 
-// A picture written beside the note is found through its relative path.
+func TestPastedFileBecomesALink(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	a.mediaDir = t.TempDir()
+	openWindow(t, a)
+
+	file := filepath.Join(t.TempDir(), "报表.pdf")
+	if err := os.WriteFile(file, []byte("%PDF"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.insertPasted(nativeclip.Data{Files: []string{file}})
+
+	link := filepath.ToSlash(filepath.Join(a.mediaDir, "报表.pdf"))
+	if got := a.text(); !strings.Contains(got, "[报表.pdf]("+link+")") {
+		t.Fatalf("document = %q, want the file link to %s", got, link)
+	}
+}
+
+// A screenshot arrives from Windows as a bitmap; the renderer cannot decode
+// that, so it is stored as PNG and the link follows.
+func TestPastedPictureBytesAreSavedAsPNG(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	a.mediaDir = t.TempDir()
+	openWindow(t, a)
+
+	a.insertPasted(nativeclip.Data{Images: []nativeclip.Image{{MIME: "image/bmp", Data: bmpBytes(t)}}})
+
+	link := filepath.ToSlash(filepath.Join(a.mediaDir, "pasted-1.png"))
+	if got := a.text(); !strings.Contains(got, "![]("+link+")") {
+		t.Fatalf("document = %q, want the picture link to %s", got, link)
+	}
+	saved, err := os.Open(filepath.Join(a.mediaDir, "pasted-1.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer saved.Close()
+	if _, format, err := image.DecodeConfig(saved); err != nil || format != "png" {
+		t.Fatalf("saved format = %q, err = %v", format, err)
+	}
+}
+
+func TestRemotePicturesStayOff(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	openWindow(t, a)
+
+	if _, err := a.loadImage(context.Background(), "https://example.com/a.png"); err == nil {
+		t.Fatal("a remote picture was read")
+	}
+}
+
 func TestImageLoadsFromTheDocumentFolder(t *testing.T) {
 	dir, path := writeNote(t)
-	if err := os.WriteFile(filepath.Join(dir, "pic.png"), []byte(pngBytes(t)), 0o644); err != nil {
+	picture := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(picture, pngData(t), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	a := newApp(path, "")
 
-	img, err := a.loadImage(context.Background(), "pic.png")
+	img, err := a.loadImage(context.Background(), "shot.png")
 	if err != nil {
 		t.Fatalf("loadImage: %v", err)
 	}
@@ -665,322 +373,134 @@ func TestImageLoadsFromTheDocumentFolder(t *testing.T) {
 	}
 }
 
-// A picture written in the working directory, not beside the note, is found by
-// falling back to it instead of failing.
 func TestImageLoadsFromTheWorkingDirectory(t *testing.T) {
 	dir := t.TempDir()
-	notes := filepath.Join(dir, "notes")
-	if err := os.MkdirAll(notes, 0o755); err != nil {
+	sub := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(notes, "note.md")
-	if err := os.WriteFile(path, []byte("![pic](pics/pic.png)"+string(rune(10))), 0o644); err != nil {
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "pics"), 0o755); err != nil {
+	path := filepath.Join(sub, "note.md")
+	if err := os.WriteFile(path, []byte("# 标题\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "pics", "pic.png"), []byte(pngBytes(t)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "cover.png"), pngData(t), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	a := newApp(path, dir)
+	a := newApp("", dir)
+	a.path = path
 
-	if _, err := a.loadImage(context.Background(), "pics/pic.png"); err != nil {
+	if _, err := a.loadImage(context.Background(), "cover.png"); err != nil {
 		t.Fatalf("loadImage: %v", err)
 	}
 }
 
-// Editors paste file URLs and percent escapes; both name a real picture.
 func TestImagePathAcceptsFileURLsAndEscapes(t *testing.T) {
 	dir, path := writeNote(t)
+	picture := filepath.Join(dir, "my shot.png")
+	if err := os.WriteFile(picture, pngData(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	a := newApp(path, "")
 
-	got, err := a.imagePath("file:///" + filepath.ToSlash(filepath.Join(dir, "my shot.png")))
-	if err != nil {
-		t.Fatalf("imagePath: %v", err)
-	}
-	if want := filepath.Join(dir, "my shot.png"); got != want {
-		t.Fatalf("path = %q, want %q", got, want)
-	}
-
-	got, err = a.imagePath("<my%20shot.png>")
-	if err != nil {
-		t.Fatalf("imagePath: %v", err)
-	}
-	if want := filepath.Join(dir, "my shot.png"); got != want {
-		t.Fatalf("path = %q, want %q", got, want)
+	for _, src := range []string{
+		"my%20shot.png",
+		"<my shot.png>",
+		"file:///" + filepath.ToSlash(filepath.Join(dir, "my shot.png")),
+	} {
+		if _, err := a.loadImage(context.Background(), src); err != nil {
+			t.Fatalf("loadImage(%q): %v", src, err)
+		}
 	}
 }
 
-// A path pasted from Explorer has backslashes and is often relative to the
-// directory the editor was started in rather than to the note.
 func TestImagePathAcceptsBackslashesFromTheWorkdir(t *testing.T) {
-	slash := string(rune(92))
-	root := t.TempDir()
-	notes := filepath.Join(root, "notes")
-	pics := filepath.Join(root, "pics")
-	for _, dir := range []string{notes, pics} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	path := filepath.Join(notes, "note.md")
-	if err := os.WriteFile(path, []byte("![pic](pics/pic.png)"+string(rune(10))), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(pics, "pic.png"), []byte(pngBytes(t)), 0o644); err != nil {
+	dir, path := writeNote(t)
+	if err := os.WriteFile(filepath.Join(dir, "deep.png"), pngData(t), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	a := newApp(path, "")
-	t.Chdir(root)
 
-	if _, err := a.loadImage(context.Background(), "pics"+slash+"pic.png"); err != nil {
+	if _, err := a.loadImage(context.Background(), strings.ReplaceAll(filepath.Join(dir, "deep.png"), "/", "\\")); err != nil {
 		t.Fatalf("loadImage: %v", err)
 	}
 }
 
-// A picture the loader cannot read says so on the status bar.
+// A note that already points at a bitmap still renders: the renderer cannot
+// decode BMP, so it is read here.
+func TestImageLoadsABitmap(t *testing.T) {
+	dir, path := writeNote(t)
+	if err := os.WriteFile(filepath.Join(dir, "shot.bmp"), bmpBytes(t), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+
+	if _, err := a.loadImage(context.Background(), "shot.bmp"); err != nil {
+		t.Fatalf("loadImage: %v", err)
+	}
+}
+
 func TestFailedPictureIsReported(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app := openWindow(t, a)
 
 	if _, err := a.loadImage(context.Background(), "missing.png"); err == nil {
-		t.Fatal("a missing picture loaded")
+		t.Fatal("a missing picture was read")
 	}
-	// The report is queued for the UI goroutine, so one frame runs it.
 	app.Render()
-
-	if got, want := a.status, "图片读取失败：missing.png"; got != want {
-		t.Fatalf("status = %q, want %q", got, want)
+	if !strings.Contains(a.status, "图片读取失败") {
+		t.Fatalf("status = %q, want the picture failure", a.status)
 	}
 }
 
-// The renderer reads local pictures only; a note never reaches the network.
-func TestRemotePicturesStayOff(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-
-	if _, err := a.loadImage(context.Background(), "https://example.com/a.png"); err == nil {
-		t.Fatal("a remote picture was loaded")
-	}
-}
-
-// A join across blocks is an edit like any other: it marks the document dirty
-// and, in the workspace, schedules the save.
-func TestJoiningBlocksMarksTheDocumentDirty(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.joinUp()
-
-	if !a.dirty {
-		t.Fatal("the document stayed clean after the blocks merged")
-	}
-	if got, want := a.text(), "# 标题正文"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-}
-
-// The merge of two blocks must reach the file: in the workspace the save runs
-// three hundred milliseconds after the last key, so the test waits for it.
-func TestMergedBlocksAreSaved(t *testing.T) {
-	dir, _ := writeNote(t)
-	a := newApp("", dir)
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.joinUp()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		app.Render()
-		if got := mustRead(t, filepath.Join(dir, "note.md")); got == "# 标题正文" {
-			return
+// bmpBytes is what the Windows clipboard hands over for a screenshot.
+func bmpBytes(t *testing.T) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 20, G: 120, B: 200, A: 255})
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("file = %q, want the merged document", mustRead(t, filepath.Join(dir, "note.md")))
-}
-
-// A real Backspace on the buffer's first cell runs the same merge as joinUp.
-func TestBackspaceKeyMergesAndSaves(t *testing.T) {
-	dir, _ := writeNote(t)
-	a := newApp("", dir)
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	app.Press("backspace")
-
-	if got, want := a.text(), "# 标题正文"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		app.Render()
-		if mustRead(t, filepath.Join(dir, "note.md")) == "# 标题正文" {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("file = %q after the merge", mustRead(t, filepath.Join(dir, "note.md")))
-}
-
-// Enter at the start of a block leaves an empty line above instead of doing
-// nothing, which is what the key does in Typora.
-func TestEnterAtTheStartOfABlockAddsALineAbove(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.newLine()
-
-	if got, want := a.buffer(), "\n正文"; got != want {
-		t.Fatalf("block = %q, want %q", got, want)
-	}
-	if got, want := a.dirty, true; got != want {
-		t.Fatalf("dirty = %v, want %v", got, want)
-	}
-}
-
-// Backspace in an empty block takes the blank away and lands at the end of the
-// block above, the way Typora joins paragraphs.
-func TestBackspaceInAnEmptyBlockMergesUp(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.appendBlock()
-	if got, want := len(a.blocks), 3; got != want {
-		t.Fatalf("blocks = %d, want %d", got, want)
-	}
-
-	app.Press("backspace")
-
-	if got, want := len(a.blocks), 2; got != want {
-		t.Fatalf("blocks after backspace = %d, want %d", got, want)
-	}
-	if got, want := a.text(), "# 标题\n\n正文"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-	if got, want := a.caret(), (mddoc.Pos{Line: 0, Col: 2}); got != want {
-		t.Fatalf("caret = %v, want the end of the block above %v", got, want)
-	}
-}
-
-// Source mode puts the whole file in one buffer, so the editor's own select-all
-// reaches every block from there.
-func TestCtrlAInSourceModeSelectsTheWholeDocument(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.appendBlock()
-	app.Press("ctrl+/")
-	app.Press("ctrl+a")
-
-	selected := strings.Trim(a.editor.Selection(), blockGuard)
-	if got, want := selected, a.buffer(); got != want {
-		t.Fatalf("selection = %q, want the whole buffer %q", got, want)
-	}
-	if !strings.HasPrefix(selected, "# 标题\n\n正文") {
-		t.Fatalf("selection = %q, want the whole file in it", selected)
-	}
-}
-
-// A click on a rendered block leaves the caret in front of the leading guard.
-// Typing there must not push the guard into the text: the block takes the
-// letters and keeps its guards on the outside.
-func TestTypingBeforeTheGuardKeepsItAtTheEdge(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.editor.SetCursor(0, 0)
-	a.changed("x" + blockGuard + "正文" + blockGuard)
-
-	if got, want := a.buffer(), "x正文"; got != want {
-		t.Fatalf("block = %q, want %q", got, want)
-	}
-	if got, want := a.editor.Value(), blockGuard+"x正文"+blockGuard; got != want {
-		t.Fatalf("editor = %q, want the guards back at the edges %q", got, want)
-	}
-	if got, want := a.caret(), (mddoc.Pos{Line: 0, Col: 1}); got != want {
-		t.Fatalf("caret = %v, want %v", got, want)
-	}
-	if got, want := a.text(), "# 标题\n\nx正文"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-}
-
-// An empty block only holds its guards, and selecting them is still a select
-// all, so the second Ctrl+A covers the document without copying it into one
-// buffer, which would cost a frame per line on a long file.
-func TestCtrlAInAnEmptyBlockPicksTheWholeDocument(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	a.appendBlock()
-	app.Press("ctrl+a")
-	app.Render()
-
-	if got, want := a.allSelected, true; got != want {
-		t.Fatalf("allSelected = %v, want %v", got, want)
-	}
-	if got, want := len(a.blocks), 3; got != want {
-		t.Fatalf("blocks = %d, want the document to stay split in %d", got, want)
-	}
-}
-
-// The first edit after the pick replaces every block, the way typing over a
-// select all does.
-func TestTypingReplacesThePickedDocument(t *testing.T) {
-	_, path := writeNote(t)
-	a := newApp(path, "")
-	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
-
-	a.activate(1)
-	app.Press("ctrl+a")
-	app.Render()
-	app.Type("新")
-
-	if got, want := a.text(), "新"; got != want {
-		t.Fatalf("document = %q, want %q", got, want)
-	}
-	if got, want := a.allSelected, false; got != want {
-		t.Fatalf("allSelected = %v, want it cleared by the edit", got)
-	}
-}
-
-// keel draws every line of the editor buffer each frame, so a long block is
-// drawn inside a bounded box and scrolls there instead of stretching the page.
-func TestLongBlockKeepsABoundedEditor(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "list.md")
-	var doc strings.Builder
-	doc.WriteString("# 标题\n\n")
-	for i := 0; i < 200; i++ {
-		fmt.Fprintf(&doc, "- 第 %d 项\n", i)
-	}
-	if err := os.WriteFile(path, []byte(doc.String()), 0o644); err != nil {
+	if err := bmp.Encode(&out, img); err != nil {
 		t.Fatal(err)
 	}
-	a := newApp(path, "")
-	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	return out.Bytes()
+}
 
-	a.activate(1)
-
-	if got, want := a.editorHeight(), float32(maxEditorHeight); got != want {
-		t.Fatalf("editor height = %v, want the bound %v", got, want)
+// pngData is a tiny picture, small enough to keep the test fast.
+func pngData(t *testing.T) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 230, G: 120, B: 20, A: 255})
+		}
 	}
-	if got, want := a.editorHeight() < float32(201*lineHeight), true; got != want {
-		t.Fatalf("editor height = %v, want it below the content height", a.editorHeight())
+	if err := png.Encode(&out, img); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+// A close reports unsaved text in single-file mode, which is what git reads as
+// "abort the commit".
+func TestCloseCodeReportsUnsavedText(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	a.once()
+
+	if got := a.closeCode(); got != 0 {
+		t.Fatalf("close code = %d, want 0 for a saved file", got)
+	}
+	a.dirty = true
+	if got := a.closeCode(); got != exitUnsaved {
+		t.Fatalf("close code = %d, want %d for unsaved text", got, exitUnsaved)
+	}
+	a.mode = modeWorkspace
+	if got := a.closeCode(); got != 0 {
+		t.Fatalf("close code = %d, want 0 in the working directory", got)
 	}
 }

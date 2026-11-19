@@ -1,5 +1,7 @@
 # 用分块编辑实现真 WYSIWYG
 
+Superseded by [ADR-0003](0003-one-editor-with-decorations.md)：模拟层带来的编辑缺陷（跨块退格、空段落退格与全选、守卫字符入库）不可控，已回到整篇单编辑器。
+
 ## 背景
 
 ADR-0001 决定在 `kit.CodeEditor` 上用 `CodeDecoration` 做"源码即排版"。原型验收时用户要求真 WYSIWYG（标记消失、标题按标题字号），而 keel v0.4.11 的装饰能力到不了那一步：`ui/kit/code_editor.go` 里 `CodeDecoration` 的注释原文是 "Weight and Italic restyle the glyphs of a CodeDecorationText range. Glyphs keep the regular positions, so carets and clicks do not move."，`ui/kit`、`ui/el` 全仓没有 conceal、零宽字符或行内折叠；把标记染成背景色只会留下等宽空白，标题字还是正文大小。

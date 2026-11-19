@@ -48,12 +48,20 @@ func main() {
 	window.Main()
 }
 
-// onClose runs after the window is gone, which is the only hook left: keel does
-// not let a view cancel a close. Single-file mode therefore turns unsaved text
-// into exit code 1, and git reads that as "abort the commit".
-func (a *app) onClose() {
+// closeCode is the exit status the close leaves behind: single-file mode reports
+// unsaved text as 1, which git reads as "abort the commit".
+func (a *app) closeCode() int {
 	if a.mode == modeSingle && a.dirty {
-		os.Exit(exitUnsaved)
+		return exitUnsaved
+	}
+	return 0
+}
+
+// onClose runs after the window is gone, which is the only hook left: keel does
+// not let a view cancel a close.
+func (a *app) onClose() {
+	if code := a.closeCode(); code != 0 {
+		os.Exit(code)
 	}
 }
 

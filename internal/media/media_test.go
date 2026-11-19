@@ -1,9 +1,15 @@
 package media
 
 import (
+	"bytes"
+	"encoding/binary"
+	"image"
+	"image/color"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/image/bmp"
 )
 
 // Save writes the bytes under the root and returns the absolute path markdown
@@ -99,4 +105,101 @@ func read(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// A bitmap from the clipboard is re-encoded as PNG, because the markdown
+// renderer decodes PNG, JPEG, GIF and WebP only.
+func TestEncodeTurnsABitmapIntoPNG(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 6, 4))
+	for x := 0; x < 6; x++ {
+		img.Set(x, 1, color.RGBA{R: 9, G: 200, B: 30, A: 255})
+	}
+	var in bytes.Buffer
+	if err := bmp.Encode(&in, img); err != nil {
+		t.Fatal(err)
+	}
+
+	name, data, err := Encode("pasted-1.bmp", in.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "pasted-1.png"; name != want {
+		t.Fatalf("name = %q, want %q", name, want)
+	}
+	if _, format, err := image.DecodeConfig(bytes.NewReader(data)); err != nil || format != "png" {
+		t.Fatalf("format = %q, err = %v", format, err)
+	}
+}
+
+// Everything else is stored untouched.
+func TestEncodeLeavesOtherFormatsAlone(t *testing.T) {
+	name, data, err := Encode("shot.png", []byte("pixels"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "shot.png" || string(data) != "pixels" {
+		t.Fatalf("name = %q, data = %q", name, data)
+	}
+}
+
+// fieldBMP builds a 32 bit bitmap the way the Windows clipboard does: a 40 byte
+// header and BI_BITFIELDS masks after it, which golang.org/x/image/bmp refuses.
+func fieldBMP(width, height int, fill color.NRGBA) []byte {
+	dib := 40
+	masks := 12
+	offset := 14 + dib + masks
+	stride := width * 4
+	file := make([]byte, offset+stride*height)
+	file[0], file[1] = 'B', 'M'
+	binary.LittleEndian.PutUint32(file[2:], uint32(len(file)))
+	binary.LittleEndian.PutUint32(file[10:], uint32(offset))
+	binary.LittleEndian.PutUint32(file[14:], uint32(dib))
+	binary.LittleEndian.PutUint32(file[18:], uint32(width))
+	binary.LittleEndian.PutUint32(file[22:], uint32(height))
+	binary.LittleEndian.PutUint16(file[26:], 1)
+	binary.LittleEndian.PutUint16(file[28:], 32)
+	binary.LittleEndian.PutUint32(file[30:], 3) // BI_BITFIELDS
+	maskAt := 14 + dib
+	binary.LittleEndian.PutUint32(file[maskAt:], 0x00ff0000)
+	binary.LittleEndian.PutUint32(file[maskAt+4:], 0x0000ff00)
+	binary.LittleEndian.PutUint32(file[maskAt+8:], 0x000000ff)
+	pixel := uint32(fill.B) | uint32(fill.G)<<8 | uint32(fill.R)<<16
+	for y := 0; y < height; y++ {
+		line := file[offset+y*stride:]
+		for x := 0; x < width; x++ {
+			binary.LittleEndian.PutUint32(line[x*4:], pixel)
+		}
+	}
+	return file
+}
+
+// A clipboard screenshot is a bit-field bitmap: it must decode, and pasting must
+// store it as PNG because the renderer cannot read BMP.
+func TestEncodeDecodesABitFieldBitmap(t *testing.T) {
+	name, data, err := Encode("pasted-1.bmp", fieldBMP(12, 9, color.NRGBA{R: 230, G: 120, B: 20, A: 255}))
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if want := "pasted-1.png"; name != want {
+		t.Fatalf("name = %q, want %q", name, want)
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || format != "png" {
+		t.Fatalf("format = %q, err = %v", format, err)
+	}
+	if cfg.Width != 12 || cfg.Height != 9 {
+		t.Fatalf("size = %dx%d, want 12x9", cfg.Width, cfg.Height)
+	}
+}
+
+// The colour survives the round trip, so a screenshot does not turn black.
+func TestDecodeBMPKeepsTheColour(t *testing.T) {
+	img, err := decodeBMP(fieldBMP(2, 2, color.NRGBA{R: 230, G: 120, B: 20, A: 255}))
+	if err != nil {
+		t.Fatalf("decodeBMP: %v", err)
+	}
+	r, g, b, _ := img.At(0, 0).RGBA()
+	if got := [3]uint32{r >> 8, g >> 8, b >> 8}; got != [3]uint32{230, 120, 20} {
+		t.Fatalf("colour = %v, want [230 120 20]", got)
+	}
 }
