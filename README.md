@@ -2,25 +2,74 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A cross-platform application built with [Keel](https://keel.dyike.com).
+A small WYSIWYG Markdown editor for the desktop, built in Go on the
+[keel](https://github.com/dyike/keel) UI framework. It is meant to be usable as
+`$EDITOR`: point `git config core.editor` at it and commits open a real editor
+instead of a terminal buffer.
+
+## How it renders
+
+Every top-level block is drawn by `ui/markdown`, so Markdown markers are gone and
+headings keep their real size. Clicking a block turns that one block into its
+source text; `Esc` (or clicking another block) puts it back. Only the block you
+are editing is ever shown as source.
+
+This is the deliberate trade-off recorded in
+[`docs/adr/0002-block-editing-wysiwyg.md`](docs/adr/0002-block-editing-wysiwyg.md):
+keel decorations cannot hide characters or change glyph width, so true WYSIWYG
+needs a per-block editor rather than inline styling.
+
+## Modes
+
+- `vibemark <file>` — single file, blocking, for `$EDITOR`. Saves on `Ctrl+S`
+  only; closing with unsaved changes exits `1` so git aborts the commit.
+- `vibemark --dir <dir>` — browse a directory of Markdown files with a tree on
+  the left. Saves automatically 300 ms after you stop typing.
+- `vibemark` — reopens the last directory, or the current working directory.
+
+Exit codes for the single-file mode: `0` saved, `1` cancelled, `2` could not
+open or write (message on stderr).
+
+## Shortcuts
+
+| Chord | Action |
+| --- | --- |
+| `Ctrl+S` | Save |
+| `Esc` | Commit the active block |
+| `Ctrl+P` | Toggle the full-screen preview |
+| `Ctrl+B` / `Ctrl+I` / `Ctrl+E` | Bold / italic / inline code around the selection |
+| `Ctrl+K` | Wrap the selection as a link |
+| `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Heading level 1 / 2 / 3 |
+| `Ctrl+Shift+8` / `Ctrl+Shift+9` / `Ctrl+Shift+\` | Bullet list / ordered list / blockquote |
+
+## Use it as git's editor
 
 ```sh
-keel run              # Run
-keel build            # Package for the current platform into dist/
-keel build -target windows
-keel doctor           # Check the build environment
-keel doctor -target android
-keel build -target android # Android SDK + NDK + JDK; development APK
-keel run -target android   # Install and launch on a running emulator or connected device
-keel doctor -target ios
-keel build -target ios # macOS + full Xcode; simulator .app
-keel run -target ios   # Install and launch on an iOS simulator
+go build -o vibemark.exe .        # or: keel build
+# put it on PATH, then:
+git config --global core.editor vibemark
 ```
 
-- Edit the UI in `app.go`; window setup lives in `main.go`.
-- `app_test.go` uses the app in memory, by visible text, without opening a window: `go test ./...`. See [Testing your app](https://github.com/dyike/keel/blob/main/docs/testing.md#testing-your-app).
-- Configure the application name, ID, version, and icon in `keel.json`. Replace `appicon.png` with a square, full-bleed 1024×1024 image without rounded corners. Packaging applies the macOS, Windows, and Linux icon shapes. Use `keel icon` to preview the platform icons. iOS uses full-bleed artwork with system rounding and transparency flattened over white.
+## Development
 
-- iOS defaults to a minimum version of 18.0, configurable through `ios.minimum_version`. Device packaging uses `keel build -target ios -device -sign "Apple Development: …" -provision app.mobileprovision`. See the [iOS guide](https://github.com/dyike/keel/blob/main/docs/ios.md).
+```sh
+go build ./...
+go test ./...       # UI tests run headless through keel's windowtest
+gofmt -l .          # .githooks/pre-commit checks this, plus vet and test
+```
 
-- Android defaults to minimum API 23 and target API 35, configurable under `android`. APKs use `dist/android/debug.keystore` for development signing; keep the key to replace installed builds. See [Mobile support](https://github.com/dyike/keel/blob/main/docs/mobile.md).
+Enable the hooks once per clone: `git config core.hooksPath .githooks`.
+
+Design records live in [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.md),
+[`GLOSSARY.md`](GLOSSARY.md), and [`docs/adr/`](docs/adr/).
+
+## Known limits
+
+- The active block shows keel's line-number gutter and code background; keel
+  hard-codes that gutter with no toggle, and switching to a plain text area
+  would lose the cursor and selection APIs the wrap commands need.
+- Undo covers the active block only.
+- A click selects a block, not a character position inside it; click inside the
+  opened block to place the caret.
+- No system file dialog, no file drag-and-drop, and no images: keel v0.4.11
+  offers none of them on desktop.
