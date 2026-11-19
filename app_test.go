@@ -753,8 +753,7 @@ func TestBackspaceInAnEmptyBlockMergesUp(t *testing.T) {
 }
 
 // Source mode puts the whole file in one buffer, so the editor's own select-all
-// reaches every block from there. That is the way to select all from an empty
-// paragraph: kit.CodeEditor selects its buffer, and an empty one holds nothing.
+// reaches every block from there.
 func TestCtrlAInSourceModeSelectsTheWholeDocument(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
@@ -797,5 +796,28 @@ func TestTypingBeforeTheGuardKeepsItAtTheEdge(t *testing.T) {
 	}
 	if got, want := a.text(), "# 标题\n\nx正文"; got != want {
 		t.Fatalf("document = %q, want %q", got, want)
+	}
+}
+
+// Ctrl+A in an empty block selects both guards, which is the whole buffer, so
+// the first press opens the file in one buffer like any other block.
+func TestCtrlAInAnEmptyBlockOpensTheWholeDocument(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.appendBlock()
+	app.Press("ctrl+a")
+	app.Render()
+
+	if got, want := a.wholeDoc, true; got != want {
+		t.Fatalf("wholeDoc = %v, want %v", got, want)
+	}
+	if got, want := a.buffer(), a.doc; got != want {
+		t.Fatalf("editor = %q, want the whole document %q", got, want)
+	}
+	if !strings.HasPrefix(a.buffer(), "# 标题\n\n正文") {
+		t.Fatalf("editor = %q, want the file in it", a.buffer())
 	}
 }

@@ -109,18 +109,11 @@ Design records live in [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.
 
 ## Known limits
 
-- The active block shows keel's line-number gutter and code background; keel
-  hard-codes that gutter with no toggle, and switching to a plain text area
-  would lose the cursor and selection APIs the wrap commands need.
-- Undo covers the active block only.
-- A click selects a block, not a character position inside it; click inside the
-  opened block to place the caret.
-- No system file dialog and no file drag-and-drop: keel v0.4.11 offers neither
-  on desktop, so a picture arrives through the clipboard.
-- Every active block carries an invisible `U+200B` guard at both ends; the
-  buffer's API has no selection setter, so removing the guard is the only
-  signal that Backspace crossed a block edge. The characters are stripped
-  before anything is written.
-- Ctrl+A selects the block under the caret, and a second Ctrl+A selects the
-  whole file. In an empty paragraph it does nothing, because there is nothing
-  there to select; press Ctrl+/ for source mode and Ctrl+A there instead.
+- The paragraph you are editing shows its source, with line numbers, while the
+  rest of the document stays typeset.
+- Undo covers the paragraph you are editing.
+- A click opens a paragraph; click again to put the caret where you want it.
+- Pictures arrive through the clipboard only: there is no file dialog and no
+  drag and drop.
+- Select all takes two presses: the first opens the whole file in the editor,
+  the second selects it.

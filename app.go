@@ -679,6 +679,9 @@ func (a *app) Render(cx *el.Context) el.Element {
 		}
 		bar.Right(textView{text: state, color: c})
 	}
+	// The editor takes the keys while it draws, so the select-all has to be
+	// noticed after the body is built, and applied in the next frame.
+	a.widenSelection()
 
 	root := el.Div().Col().WFull().HFull()
 	return root.Child(body, bar.Render(cx))
@@ -785,7 +788,6 @@ func taskBox(checked bool) el.Element {
 
 // activeEditor draws the block under the caret at its own height.
 func (a *app) activeEditor(cx *el.Context) el.Element {
-	a.widenSelection()
 	lines := strings.Count(a.buffer(), "\n") + 1
 	height := float32(lines*lineHeight + 24)
 	return el.Div().WFull().Child(a.editor.Height(height).Render(cx))
@@ -793,19 +795,18 @@ func (a *app) activeEditor(cx *el.Context) el.Element {
 
 // widenSelection turns a fully selected block into the whole document, so the
 // next Ctrl+A selects every block. kit.CodeEditor cannot be handed a selection
-// but it does select its whole buffer, and there the buffer is one block. An
-// empty block cannot widen: it holds nothing to select, so there is no change
-// to notice, and Ctrl+A there does nothing until Ctrl+/ puts the file in one
-// buffer.
+// but it does select its whole buffer, and there the buffer is one block. The
+// comparison keeps the guards: a select-all covers them, and an empty block
+// (guards only) is told apart from no selection at all, which is "".
 func (a *app) widenSelection() {
 	if a.wholeDoc || a.sourceMode || a.previewing || a.active < 0 || len(a.blocks) < 2 {
 		return
 	}
-	value := a.buffer()
-	selected := strings.TrimSuffix(strings.TrimPrefix(a.editor.Selection(), blockGuard), blockGuard)
-	if value == "" || selected != value {
+	if a.editor.Selection() != a.editor.Value() {
 		return
 	}
+	// The body is already built, so the editor has drawn and taken the key; the
+	// document swap shows up on the next frame.
 	a.wholeDocument()
 }
 
