@@ -725,3 +725,77 @@ func TestEnterAtTheStartOfABlockAddsALineAbove(t *testing.T) {
 		t.Fatalf("dirty = %v, want %v", got, want)
 	}
 }
+
+// Backspace in an empty block takes the blank away and lands at the end of the
+// block above, the way Typora joins paragraphs.
+func TestBackspaceInAnEmptyBlockMergesUp(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.appendBlock()
+	if got, want := len(a.blocks), 3; got != want {
+		t.Fatalf("blocks = %d, want %d", got, want)
+	}
+
+	app.Press("backspace")
+
+	if got, want := len(a.blocks), 2; got != want {
+		t.Fatalf("blocks after backspace = %d, want %d", got, want)
+	}
+	if got, want := a.text(), "# 标题\n\n正文"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+	if got, want := a.caret(), (mddoc.Pos{Line: 0, Col: 2}); got != want {
+		t.Fatalf("caret = %v, want the end of the block above %v", got, want)
+	}
+}
+
+// Source mode puts the whole file in one buffer, so the editor's own select-all
+// reaches every block from there. That is the way to select all from an empty
+// paragraph: kit.CodeEditor selects its buffer, and an empty one holds nothing.
+func TestCtrlAInSourceModeSelectsTheWholeDocument(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.appendBlock()
+	app.Press("ctrl+/")
+	app.Press("ctrl+a")
+
+	selected := strings.Trim(a.editor.Selection(), blockGuard)
+	if got, want := selected, a.buffer(); got != want {
+		t.Fatalf("selection = %q, want the whole buffer %q", got, want)
+	}
+	if !strings.HasPrefix(selected, "# 标题\n\n正文") {
+		t.Fatalf("selection = %q, want the whole file in it", selected)
+	}
+}
+
+// A click on a rendered block leaves the caret in front of the leading guard.
+// Typing there must not push the guard into the text: the block takes the
+// letters and keeps its guards on the outside.
+func TestTypingBeforeTheGuardKeepsItAtTheEdge(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	a.editor.SetCursor(0, 0)
+	a.changed("x" + blockGuard + "正文" + blockGuard)
+
+	if got, want := a.buffer(), "x正文"; got != want {
+		t.Fatalf("block = %q, want %q", got, want)
+	}
+	if got, want := a.editor.Value(), blockGuard+"x正文"+blockGuard; got != want {
+		t.Fatalf("editor = %q, want the guards back at the edges %q", got, want)
+	}
+	if got, want := a.caret(), (mddoc.Pos{Line: 0, Col: 1}); got != want {
+		t.Fatalf("caret = %v, want %v", got, want)
+	}
+	if got, want := a.text(), "# 标题\n\nx正文"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+}

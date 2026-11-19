@@ -373,6 +373,29 @@ func (a *app) changed(raw string) {
 		a.lastValue = raw
 		return
 	}
+	// An empty block is nothing but its two guards, so a Backspace leaves one
+	// behind and keeps both of the edge checks above quiet: it means the same
+	// thing as deleting the leading guard.
+	if raw == blockGuard {
+		a.lastValue = raw
+		a.joinUp()
+		return
+	}
+	// A click on a rendered block leaves the caret at column zero, in front of
+	// the leading guard, so typing there would push the guard into the text and
+	// eventually into the file. Put it back and keep the caret after the typing.
+	if inner := strings.TrimSuffix(strings.TrimPrefix(raw, blockGuard), blockGuard); strings.Contains(inner, blockGuard) {
+		off := strings.Index(raw, blockGuard)
+		clean := strings.ReplaceAll(raw, blockGuard, "")
+		// Every guard before the cut disappears from that offset's left side.
+		off -= strings.Count(raw[:off], blockGuard) * len(blockGuard)
+		if off > len(clean) {
+			off = len(clean)
+		}
+		a.setBuffer(clean, mddoc.PosOf(clean, off))
+		a.touch(clean)
+		return
+	}
 	// keel swallows Backspace on the buffer's first cell, so the guard going
 	// away is the trace of that key: it joins the block above instead, the way
 	// deleting a paragraph break does in Typora.
@@ -770,7 +793,10 @@ func (a *app) activeEditor(cx *el.Context) el.Element {
 
 // widenSelection turns a fully selected block into the whole document, so the
 // next Ctrl+A selects every block. kit.CodeEditor cannot be handed a selection
-// but it does select its whole buffer, and there the buffer is one block.
+// but it does select its whole buffer, and there the buffer is one block. An
+// empty block cannot widen: it holds nothing to select, so there is no change
+// to notice, and Ctrl+A there does nothing until Ctrl+/ puts the file in one
+// buffer.
 func (a *app) widenSelection() {
 	if a.wholeDoc || a.sourceMode || a.previewing || a.active < 0 || len(a.blocks) < 2 {
 		return
@@ -780,6 +806,16 @@ func (a *app) widenSelection() {
 	if value == "" || selected != value {
 		return
 	}
+	a.wholeDocument()
+}
+
+// wholeDocument puts every block into one editor buffer, so kit.CodeEditor's
+// own select-all covers the file.
+func (a *app) wholeDocument() {
+	if a.wholeDoc || a.sourceMode || a.previewing || a.active < 0 || len(a.blocks) < 2 {
+		return
+	}
+	value := a.buffer()
 	at := a.caret()
 	at.Line += strings.Count(a.before, "\n")
 	a.wholeDoc = true

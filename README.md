@@ -121,3 +121,6 @@ Design records live in [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.
   buffer's API has no selection setter, so removing the guard is the only
   signal that Backspace crossed a block edge. The characters are stripped
   before anything is written.
+- Ctrl+A selects the block under the caret, and a second Ctrl+A selects the
+  whole file. In an empty paragraph it does nothing, because there is nothing
+  there to select; press Ctrl+/ for source mode and Ctrl+A there instead.
