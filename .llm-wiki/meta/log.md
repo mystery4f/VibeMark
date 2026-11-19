@@ -26,3 +26,6 @@
 ## [2026-11-19T02:54:41.779Z] observe
 - slug: "obs-2026-11-19-keel-v0-4-11-b4cc10e", title: "keel 参考版本锚定 v0.4.11 / b4cc10e，可逐字节重建", relevance: "high"
 
+## [2026-11-19T04:13:55.287Z] observe
+- slug: "obs-2026-11-19-keel-wysiwyg", title: "keel 装饰不能隐藏字符，真 WYSIWYG 只能靠分块编辑", relevance: "high"
+

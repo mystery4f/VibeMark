@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "last_updated": "2026-11-19T02:54:41.782Z",
+  "last_updated": "2026-11-19T04:13:55.294Z",
   "pages": {
     "sources/SRC-2026-11-19-001": {
       "type": "source",
@@ -71,6 +71,23 @@
       "relevance": "high",
       "observed_at": "2026-11-19T02:54:41.778Z",
       "source_context": "评估 .tmp 里哪些是真临时文件",
+      "created": "2026-11-19",
+      "updated": "2026-11-19"
+    },
+    "sources/obs-2026-11-19-keel-wysiwyg": {
+      "type": "source",
+      "title": "Observation: keel 装饰不能隐藏字符，真 WYSIWYG 只能靠分块编辑",
+      "tags": [
+        "keel",
+        "wysiwyg",
+        "editor",
+        "adr"
+      ],
+      "status": "observation",
+      "slug": "obs-2026-11-19-keel-wysiwyg",
+      "relevance": "high",
+      "observed_at": "2026-11-19T04:13:55.285Z",
+      "source_context": "VibeMark 分块编辑 WYSIWYG 实现",
       "created": "2026-11-19",
       "updated": "2026-11-19"
     }
