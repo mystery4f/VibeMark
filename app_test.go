@@ -567,7 +567,8 @@ func TestBackspaceAtTheFirstBlockKeepsTheDocument(t *testing.T) {
 	}
 }
 
-// Pasted plain text lands at the caret, inside the open block.
+// Plain text lands at the caret. The window shortcut consumes the key, so the
+// editor's own clipboard read never runs and this is the only insertion.
 func TestPastedTextLandsAtTheCaret(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
@@ -581,23 +582,29 @@ func TestPastedTextLandsAtTheCaret(t *testing.T) {
 	}
 }
 
-// A pasted picture is copied next to the document and embedded there.
-func TestPastedPictureIsCopied(t *testing.T) {
+// A pasted picture goes to the media folder, never beside the note, and the
+// link is absolute so the note still finds it.
+func TestPastedPictureGoesToTheMediaFolder(t *testing.T) {
 	dir, path := writeNote(t)
 	src := filepath.Join(dir, "shot.png")
 	if err := os.WriteFile(src, []byte("pixels"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	a := newApp(path, "")
+	a.mediaDir = t.TempDir()
 	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
 	a.activate(1)
 	a.insertPasted(nativeclip.Data{Files: []string{src}})
 
-	if got, want := a.buffer(), "![shot.png](assets/shot.png)正文"; got != want {
+	want := "![shot.png](" + filepath.ToSlash(filepath.Join(a.mediaDir, "shot.png")) + ")正文"
+	if got := a.buffer(); got != want {
 		t.Fatalf("editor = %q, want %q", got, want)
 	}
-	if got := mustRead(t, filepath.Join(dir, "assets", "shot.png")); got != "pixels" {
+	if _, err := os.Stat(filepath.Join(dir, "assets")); !os.IsNotExist(err) {
+		t.Fatalf("the note grew an assets folder: %v", err)
+	}
+	if got := mustRead(t, filepath.Join(a.mediaDir, "shot.png")); got != "pixels" {
 		t.Fatalf("copied file = %q", got)
 	}
 }
@@ -610,30 +617,141 @@ func TestPastedFileBecomesALink(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := newApp(path, "")
+	a.mediaDir = t.TempDir()
 	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
 	a.activate(1)
 	a.insertPasted(nativeclip.Data{Files: []string{src}})
 
-	if got, want := a.buffer(), "[notes.txt](assets/notes.txt)正文"; got != want {
+	want := "[notes.txt](" + filepath.ToSlash(filepath.Join(a.mediaDir, "notes.txt")) + ")正文"
+	if got := a.buffer(); got != want {
 		t.Fatalf("editor = %q, want %q", got, want)
 	}
 }
 
 // A picture held as clipboard bytes is saved with an extension from its type.
 func TestPastedPictureBytesAreSaved(t *testing.T) {
-	dir, path := writeNote(t)
+	_, path := writeNote(t)
 	a := newApp(path, "")
+	a.mediaDir = t.TempDir()
 	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
 
 	a.activate(1)
 	a.insertPasted(nativeclip.Data{Images: []nativeclip.Image{{MIME: "image/bmp", Data: []byte("bmp")}}})
 
-	if got, want := a.buffer(), "![](assets/pasted-1.bmp)正文"; got != want {
+	want := "![](" + filepath.ToSlash(filepath.Join(a.mediaDir, "pasted-1.bmp")) + ")正文"
+	if got := a.buffer(); got != want {
 		t.Fatalf("editor = %q, want %q", got, want)
 	}
-	if got := mustRead(t, filepath.Join(dir, "assets", "pasted-1.bmp")); got != "bmp" {
+	if got := mustRead(t, filepath.Join(a.mediaDir, "pasted-1.bmp")); got != "bmp" {
 		t.Fatalf("saved file = %q", got)
+	}
+}
+
+// A picture written beside the note is found through its relative path.
+func TestImageLoadsFromTheDocumentFolder(t *testing.T) {
+	dir, path := writeNote(t)
+	if err := os.WriteFile(filepath.Join(dir, "pic.png"), []byte(pngBytes(t)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+
+	img, err := a.loadImage(context.Background(), "pic.png")
+	if err != nil {
+		t.Fatalf("loadImage: %v", err)
+	}
+	if img == nil {
+		t.Fatal("loadImage returned no pixels")
+	}
+}
+
+// A picture written in the working directory, not beside the note, is found by
+// falling back to it instead of failing.
+func TestImageLoadsFromTheWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	notes := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(notes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(notes, "note.md")
+	if err := os.WriteFile(path, []byte("![pic](pics/pic.png)"+string(rune(10))), 0o644); err != nil {
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "pics"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pics", "pic.png"), []byte(pngBytes(t)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, dir)
+
+	if _, err := a.loadImage(context.Background(), "pics/pic.png"); err != nil {
+		t.Fatalf("loadImage: %v", err)
+	}
+}
+
+// Editors paste file URLs and percent escapes; both name a real picture.
+func TestImagePathAcceptsFileURLsAndEscapes(t *testing.T) {
+	dir, path := writeNote(t)
+	a := newApp(path, "")
+
+	got, err := a.imagePath("file:///" + filepath.ToSlash(filepath.Join(dir, "my shot.png")))
+	if err != nil {
+		t.Fatalf("imagePath: %v", err)
+	}
+	if want := filepath.Join(dir, "my shot.png"); got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+
+	got, err = a.imagePath("<my%20shot.png>")
+	if err != nil {
+		t.Fatalf("imagePath: %v", err)
+	}
+	if want := filepath.Join(dir, "my shot.png"); got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+}
+
+// A path pasted from Explorer has backslashes and is often relative to the
+// directory the editor was started in rather than to the note.
+func TestImagePathAcceptsBackslashesFromTheWorkdir(t *testing.T) {
+	slash := string(rune(92))
+	root := t.TempDir()
+	notes := filepath.Join(root, "notes")
+	pics := filepath.Join(root, "pics")
+	for _, dir := range []string{notes, pics} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(notes, "note.md")
+	if err := os.WriteFile(path, []byte("![pic](pics/pic.png)"+string(rune(10))), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pics, "pic.png"), []byte(pngBytes(t)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+	t.Chdir(root)
+
+	if _, err := a.loadImage(context.Background(), "pics"+slash+"pic.png"); err != nil {
+		t.Fatalf("loadImage: %v", err)
+	}
+}
+
+// A picture the loader cannot read says so on the status bar.
+func TestFailedPictureIsReported(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	if _, err := a.loadImage(context.Background(), "missing.png"); err == nil {
+		t.Fatal("a missing picture loaded")
+	}
+	// The report is queued for the UI goroutine, so one frame runs it.
+	app.Render()
+
+	if got, want := a.status, "图片读取失败：missing.png"; got != want {
+		t.Fatalf("status = %q, want %q", got, want)
 	}
 }
 

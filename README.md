@@ -57,15 +57,22 @@ The chords follow Typora's defaults, so muscle memory carries over.
 
 ## Pictures
 
-A pasted or referenced picture is stored in an `assets/` folder next to the
-document, so a note and its images travel together:
+A pasted picture is written to `%TEMP%\vibemark` (override with
+`VIBEMARK_MEDIA`), never beside the note, and the link is absolute:
 
 ```markdown
-![shot.png](assets/shot.png)
+![shot.png](C:/Users/you/AppData/Local/Temp/vibemark/shot.png)
 ```
 
-The renderer reads local files only; a remote `https://` source is ignored
-instead of being fetched, so opening a note never reaches the network.
+The folder is the system temp directory, so Windows may clear it: copy a picture
+into the note's own folder if it has to outlive a reboot.
+
+Everything else is read from disk as written. A relative path is looked up
+beside the document first, then in the working directory, then where the editor
+started, and `file://` URLs, `<angle brackets>` and `%20` escapes all work. The
+renderer reads local files only; a remote `https://` source is skipped instead
+of fetched, so opening a note never reaches the network. A picture it cannot
+read is named on the status bar.
 
 ## Use it as git's editor
 

@@ -7,6 +7,8 @@ import (
 	"image"
 	"image/color"
 	"io/fs"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -19,8 +21,8 @@ import (
 	"github.com/dyike/keel/ui/kit"
 	"github.com/dyike/keel/ui/markdown"
 	"github.com/dyike/keel/ui/theme"
-	"github.com/mystery4f/vibemark/internal/assets"
 	"github.com/mystery4f/vibemark/internal/mddoc"
+	"github.com/mystery4f/vibemark/internal/media"
 	"github.com/mystery4f/vibemark/internal/workspace"
 )
 
@@ -64,9 +66,10 @@ type appState struct {
 type app struct {
 	state appState
 
-	mode appMode
-	dir  string
-	path string
+	mode     appMode
+	dir      string
+	path     string
+	mediaDir string // where a pasted picture is written, never beside the note
 
 	editor       *kit.CodeEditorView
 	decor        *kit.CodeDecorationCollection
@@ -109,7 +112,7 @@ type app struct {
 // newApp builds the app for one file (path) or one directory (dir). Exactly one
 // of them is non-empty when the command line named it.
 func newApp(path, dir string) *app {
-	a := &app{path: path, dir: dir, bar: kit.StatusBar(), preview: markdown.New(""), active: -1}
+	a := &app{path: path, dir: dir, bar: kit.StatusBar(), preview: markdown.New(""), active: -1, mediaDir: media.Root()}
 	if path != "" {
 		a.mode = modeSingle
 	} else {
@@ -1022,14 +1025,84 @@ func (a *app) docDir() string {
 // loadImage reads a picture for the renderer. Remote sources stay off, so a
 // note never reaches the network by accident.
 func (a *app) loadImage(ctx context.Context, src string) (image.Image, error) {
-	if strings.Contains(src, "://") || strings.HasPrefix(src, "data:") {
-		return nil, fmt.Errorf("%s: only local pictures are read", src)
+	path, err := a.imagePath(src)
+	if err != nil {
+		a.reportImageError(src, err)
+		return nil, err
 	}
-	path := filepath.FromSlash(src)
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(a.docDir(), path)
+	img, err := markdown.DecodeImage(ctx, path)
+	if err != nil {
+		a.reportImageError(src, err)
+		return nil, err
 	}
-	return markdown.DecodeImage(ctx, path)
+	return img, nil
+}
+
+// imagePath turns the source written in markdown into a path on disk. A reader
+// pastes all sorts: file URLs, percent escapes, <angle brackets> around spaces,
+// and paths that are relative to the working directory rather than the note.
+func (a *app) imagePath(src string) (string, error) {
+	raw := strings.TrimSpace(src)
+	raw = strings.TrimSuffix(strings.TrimPrefix(raw, "<"), ">")
+	switch {
+	case strings.HasPrefix(raw, "data:"):
+		return "", fmt.Errorf("%s: inline data is not read", src)
+	case strings.HasPrefix(raw, "file://"):
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", err
+		}
+		raw = u.Path
+		// file:///D:/pics/a.png keeps a slash in front of the drive letter.
+		if len(raw) > 2 && raw[0] == '/' && raw[2] == ':' {
+			raw = raw[1:]
+		}
+	case strings.Contains(raw, "://"):
+		return "", fmt.Errorf("%s: only local pictures are read", src)
+	}
+	if unescaped, err := url.PathUnescape(raw); err == nil {
+		raw = unescaped
+	}
+	// A path pasted from Explorer arrives with backslashes; treat those as
+	// separators rather than as markdown escapes.
+	path := filepath.FromSlash(strings.ReplaceAll(raw, "\\", "/"))
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	for _, base := range []string{a.docDir(), a.dir, cwd()} {
+		if base == "" {
+			continue
+		}
+		candidate := filepath.Join(base, path)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	// Nothing found: decode the path the note suggests, so the message names
+	// the place the reader expected the picture to be.
+	return filepath.Join(a.docDir(), path), nil
+}
+
+// cwd is the directory the editor was started in. A note often names a picture
+// relative to the project it lives in, which is that directory.
+func cwd() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return dir
+}
+
+// reportImageError says on the status bar which picture could not be read. The
+// loader runs off the UI thread, so the state changes inside core.Update.
+func (a *app) reportImageError(src string, err error) {
+	if err == nil {
+		return
+	}
+	core.Update(func() {
+		a.status = "图片读取失败：" + media.Name(src)
+		a.statusColor = nil
+	})
 }
 
 // paste puts the clipboard into the open block: pictures are copied next to the
@@ -1053,26 +1126,30 @@ func (a *app) insertPasted(data nativeclip.Data) {
 	if a.active < 0 || a.previewing {
 		return
 	}
+	// The window shortcut consumes the key, so the editor never runs its own
+	// clipboard read: plain text has to be inserted here too.
 	var parts []string
 	for _, file := range data.Files {
-		rel, err := assets.Copy(a.docDir(), file)
+		path, err := media.Copy(a.mediaDir, file)
 		if err != nil {
+			a.fail(userError("粘贴", media.Name(file), err))
 			continue
 		}
-		if assets.Image(file) {
-			parts = append(parts, "!["+assets.Name(file)+"]("+rel+")")
+		if media.Image(file) {
+			parts = append(parts, "!["+media.Name(file)+"]("+path+")")
 			continue
 		}
-		parts = append(parts, "["+assets.Name(file)+"]("+rel+")")
+		parts = append(parts, "["+media.Name(file)+"]("+path+")")
 	}
 	// A picture held as bytes, e.g. a screenshot, arrives without a file name.
 	for i, pic := range data.Images {
 		name := fmt.Sprintf("pasted-%d%s", i+1, pasteExt(pic.MIME))
-		rel, err := assets.Save(a.docDir(), name, pic.Data)
+		path, err := media.Save(a.mediaDir, name, pic.Data)
 		if err != nil {
+			a.fail(userError("粘贴", name, err))
 			continue
 		}
-		parts = append(parts, "![]("+rel+")")
+		parts = append(parts, "![]("+path+")")
 	}
 	text := data.Text
 	if len(parts) > 0 {
