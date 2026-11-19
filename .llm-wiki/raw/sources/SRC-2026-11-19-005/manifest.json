@@ -1,0 +1,10 @@
+{
+  "id": "SRC-2026-11-19-005",
+  "captured": "2026-11-19",
+  "packet_version": "1.0",
+  "title": "https://github.com/dyike/keel/blob/main/docs/automation.md",
+  "url": "https://github.com/dyike/keel/blob/main/docs/automation.md",
+  "format": "web",
+  "extractor": "none",
+  "extraction_status": "failed"
+}

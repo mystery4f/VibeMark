@@ -1,0 +1,11 @@
+{
+  "id": "SRC-2026-11-19-003",
+  "captured": "2026-11-19",
+  "packet_version": "1.0",
+  "title": "testing.zh-CN.md",
+  "file_path": "D:/Documents/work/code/VibeMark/.tmp/keel-repo/docs/testing.zh-CN.md",
+  "format": "markdown",
+  "extractor": "passthrough",
+  "extraction_status": "success",
+  "content_type": "text/markdown"
+}

@@ -1,0 +1,4 @@
+# QMD search index: generated from wiki/ pages by `wiki_reindex`, contains a
+# binary sqlite file and rewrites wholesale on every reindex. Nothing here is
+# authored, so it stays out of git; `wiki_reindex` rebuilds it on demand.
+meta/qmd/

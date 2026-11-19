@@ -1,5 +1,78 @@
 {
   "version": "1.0",
-  "last_updated": "2026-11-19T02:02:35.001Z",
-  "pages": {}
+  "last_updated": "2026-11-19T02:54:41.782Z",
+  "pages": {
+    "sources/SRC-2026-11-19-001": {
+      "type": "source",
+      "title": "troubleshooting.zh-CN.md",
+      "status": "skeleton",
+      "raw_path": "raw/sources/SRC-2026-11-19-001/extracted.md",
+      "source_id": "SRC-2026-11-19-001",
+      "format": "markdown",
+      "captured": "2026-11-19"
+    },
+    "sources/SRC-2026-11-19-002": {
+      "type": "source",
+      "title": "automation.zh-CN.md",
+      "status": "skeleton",
+      "raw_path": "raw/sources/SRC-2026-11-19-002/extracted.md",
+      "source_id": "SRC-2026-11-19-002",
+      "format": "markdown",
+      "captured": "2026-11-19"
+    },
+    "sources/SRC-2026-11-19-003": {
+      "type": "source",
+      "title": "testing.zh-CN.md",
+      "status": "skeleton",
+      "raw_path": "raw/sources/SRC-2026-11-19-003/extracted.md",
+      "source_id": "SRC-2026-11-19-003",
+      "format": "markdown",
+      "captured": "2026-11-19"
+    },
+    "sources/SRC-2026-11-19-004": {
+      "type": "source",
+      "title": "architecture.zh-CN.md",
+      "status": "skeleton",
+      "raw_path": "raw/sources/SRC-2026-11-19-004/extracted.md",
+      "source_id": "SRC-2026-11-19-004",
+      "format": "markdown",
+      "captured": "2026-11-19"
+    },
+    "sources/SRC-2026-11-19-005": {
+      "type": "source",
+      "title": "https://github.com/dyike/keel/blob/main/docs/automation.md",
+      "status": "failed",
+      "raw_path": "raw/sources/SRC-2026-11-19-005/extracted.md",
+      "source_id": "SRC-2026-11-19-005",
+      "format": "web",
+      "captured": "2026-11-19"
+    },
+    "sources/SRC-2026-11-19-006": {
+      "type": "source",
+      "title": "automation.md",
+      "status": "skeleton",
+      "raw_path": "raw/sources/SRC-2026-11-19-006/extracted.md",
+      "source_id": "SRC-2026-11-19-006",
+      "format": "markdown",
+      "captured": "2026-11-19"
+    },
+    "sources/obs-2026-11-19-keel-v0-4-11-b4cc10e": {
+      "type": "source",
+      "title": "Observation: keel 参考版本锚定 v0.4.11 / b4cc10e，可逐字节重建",
+      "tags": [
+        "vibemark",
+        "keel",
+        "reference",
+        "version",
+        "pin"
+      ],
+      "status": "observation",
+      "slug": "obs-2026-11-19-keel-v0-4-11-b4cc10e",
+      "relevance": "high",
+      "observed_at": "2026-11-19T02:54:41.778Z",
+      "source_context": "评估 .tmp 里哪些是真临时文件",
+      "created": "2026-11-19",
+      "updated": "2026-11-19"
+    }
+  }
 }
