@@ -1,5 +1,5 @@
 # Keep LF in the repository and in the working tree: .editorconfig declares lf,
-# while the global gitconfig sets core.autocrlf=true (see repo-local override).
+# and an eol attribute overrides core.autocrlf (true in system and user git config).
 * text=auto eol=lf
 
 *.png binary
