@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -799,9 +800,10 @@ func TestTypingBeforeTheGuardKeepsItAtTheEdge(t *testing.T) {
 	}
 }
 
-// Ctrl+A in an empty block selects both guards, which is the whole buffer, so
-// the first press opens the file in one buffer like any other block.
-func TestCtrlAInAnEmptyBlockOpensTheWholeDocument(t *testing.T) {
+// An empty block only holds its guards, and selecting them is still a select
+// all, so the second Ctrl+A covers the document without copying it into one
+// buffer, which would cost a frame per line on a long file.
+func TestCtrlAInAnEmptyBlockPicksTheWholeDocument(t *testing.T) {
 	_, path := writeNote(t)
 	a := newApp(path, "")
 	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
@@ -811,13 +813,56 @@ func TestCtrlAInAnEmptyBlockOpensTheWholeDocument(t *testing.T) {
 	app.Press("ctrl+a")
 	app.Render()
 
-	if got, want := a.wholeDoc, true; got != want {
-		t.Fatalf("wholeDoc = %v, want %v", got, want)
+	if got, want := a.allSelected, true; got != want {
+		t.Fatalf("allSelected = %v, want %v", got, want)
 	}
-	if got, want := a.buffer(), a.doc; got != want {
-		t.Fatalf("editor = %q, want the whole document %q", got, want)
+	if got, want := len(a.blocks), 3; got != want {
+		t.Fatalf("blocks = %d, want the document to stay split in %d", got, want)
 	}
-	if !strings.HasPrefix(a.buffer(), "# 标题\n\n正文") {
-		t.Fatalf("editor = %q, want the file in it", a.buffer())
+}
+
+// The first edit after the pick replaces every block, the way typing over a
+// select all does.
+func TestTypingReplacesThePickedDocument(t *testing.T) {
+	_, path := writeNote(t)
+	a := newApp(path, "")
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+	app.Press("ctrl+a")
+	app.Render()
+	app.Type("新")
+
+	if got, want := a.text(), "新"; got != want {
+		t.Fatalf("document = %q, want %q", got, want)
+	}
+	if got, want := a.allSelected, false; got != want {
+		t.Fatalf("allSelected = %v, want it cleared by the edit", got)
+	}
+}
+
+// keel draws every line of the editor buffer each frame, so a long block is
+// drawn inside a bounded box and scrolls there instead of stretching the page.
+func TestLongBlockKeepsABoundedEditor(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "list.md")
+	var doc strings.Builder
+	doc.WriteString("# 标题\n\n")
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&doc, "- 第 %d 项\n", i)
+	}
+	if err := os.WriteFile(path, []byte(doc.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := newApp(path, "")
+	windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+
+	a.activate(1)
+
+	if got, want := a.editorHeight(), float32(maxEditorHeight); got != want {
+		t.Fatalf("editor height = %v, want the bound %v", got, want)
+	}
+	if got, want := a.editorHeight() < float32(201*lineHeight), true; got != want {
+		t.Fatalf("editor height = %v, want it below the content height", a.editorHeight())
 	}
 }

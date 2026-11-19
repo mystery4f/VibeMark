@@ -111,9 +111,11 @@ Design records live in [`docs/design/vibemark-mvp.md`](docs/design/vibemark-mvp.
 
 - The paragraph you are editing shows its source, with line numbers, while the
   rest of the document stays typeset.
+- The paragraph you are editing scrolls inside its own box once it grows past
+  the window height.
 - Undo covers the paragraph you are editing.
 - A click opens a paragraph; click again to put the caret where you want it.
 - Pictures arrive through the clipboard only: there is no file dialog and no
   drag and drop.
-- Select all takes two presses: the first opens the whole file in the editor,
-  the second selects it.
+- Select all takes two presses: the first picks the paragraph, the second picks
+  the whole file, and the next keystroke replaces it.

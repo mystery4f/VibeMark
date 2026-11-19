@@ -31,6 +31,8 @@
 - 保存、退出码、自动保存都与块无关：写入的始终是拼接后的全文
 - 全屏预览仍用整篇 `ui/markdown` 渲染
 
+一块的编辑框高度随内容增长，到 600dp 封顶：keel 每帧把编辑器缓冲区里的每一行都画一遍，实测 500 行的块一帧 21ms、900 行 44ms，而把高度限在视口内之后同样的块一帧 0.27ms（`go test -bench . -bench BenchmarkFrameLongBlock`）。超出封顶的块在框内自己滚动。
+
 装饰的边界由 keel 定死：`ui/kit/code_editor.go` 的 `CodeDecoration` 注释写明 "Glyphs keep the regular positions, so carets and clicks do not move."，全仓没有 conceal/零宽/行内折叠，所以**装饰不能隐藏字符、不能改字宽**——这正是必须分块的原因。ADR 见 `docs/adr/0002-block-editing-wysiwyg.md`。
 
 块内的细节规则保持不变：

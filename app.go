@@ -37,6 +37,9 @@ const (
 	// lineHeight is one editor row in dp: kit.CodeEditor draws TextMd (13sp)
 	// at 1.5 line height.
 	lineHeight = 20
+	// maxEditorHeight bounds the editor: past a few hundred lines a frame costs
+	// tens of milliseconds, so a long block scrolls inside the box instead.
+	maxEditorHeight = 600
 	// blockIndent is the width kit.CodeEditor reserves for its gutter, so the
 	// rendered blocks start where the editor's text starts and switching blocks
 	// does not shift the text sideways.
@@ -65,11 +68,12 @@ type app struct {
 	dir  string
 	path string
 
-	editor  *kit.CodeEditorView
-	decor   *kit.CodeDecorationCollection
-	tree    *kit.TreeView
-	bar     *kit.StatusBarView
-	preview *markdown.Doc
+	editor       *kit.CodeEditorView
+	decor        *kit.CodeDecorationCollection
+	tree         *kit.TreeView
+	bar          *kit.StatusBarView
+	preview      *markdown.Doc
+	previewStale bool // the preview has to parse the document again
 
 	hasFiles bool // the working directory holds at least one markdown file
 
@@ -97,7 +101,7 @@ type app struct {
 	statusColor *color.NRGBA
 	treeHidden  bool // the sidebar is folded away
 	sourceMode  bool // the whole document is shown as one source block
-	wholeDoc    bool // Ctrl+A widened from one block to every block
+	allSelected bool // Ctrl+A picked the whole document, not just one block
 
 	ready bool
 }
@@ -184,6 +188,7 @@ func (a *app) load(content string) {
 
 // split refills the block list and drops the rendered markdown of the old one.
 func (a *app) split(content string) {
+	a.previewStale = true
 	a.active = -1
 	a.before, a.after = "", ""
 	a.doc = content
@@ -275,6 +280,11 @@ func lineAt(text string, line int) string {
 // first.
 func (a *app) activate(i int) {
 	a.commit()
+	if a.allSelected {
+		a.allSelected = false
+		a.status = ""
+		a.statusColor = nil
+	}
 	if i < 0 || i >= len(a.blocks) {
 		return
 	}
@@ -340,7 +350,7 @@ func (a *app) commit() {
 	}
 	a.doc = a.before + a.buffer() + a.after
 	a.active = -1
-	a.wholeDoc = false
+	a.allSelected = false
 	a.before, a.after = "", ""
 	a.split(a.doc)
 }
@@ -371,6 +381,14 @@ func (a *app) appendBlock() {
 func (a *app) changed(raw string) {
 	if a.splitting {
 		a.lastValue = raw
+		return
+	}
+	// The whole document is picked, so this edit replaces all of it.
+	if a.allSelected {
+		a.allSelected = false
+		a.status = ""
+		a.statusColor = nil
+		a.replaceDocument(a.buffer())
 		return
 	}
 	// An empty block is nothing but its two guards, so a Backspace leaves one
@@ -572,6 +590,7 @@ func (a *app) setValue(src string, caret mddoc.Pos) {
 
 // touch records an edit that keeps the block boundaries as they are.
 func (a *app) touch(value string) {
+	a.previewStale = true
 	a.lastValue = blockGuard + value + blockGuard
 	a.dirty = a.text() != a.saved
 	a.pending = true
@@ -665,7 +684,12 @@ func (a *app) Render(cx *el.Context) el.Element {
 		body.Child(el.Div().Grow().HFull().P(24).Items(el.Start).Justify(el.Start).
 			Child(el.Text(emptyHint).TextColor(pal.Muted)))
 	case a.previewing:
-		a.preview.SetSource(a.text())
+		// Parsing the document once per change instead of once per frame keeps
+		// a long file from re-parsing while the preview just sits there.
+		if a.previewStale {
+			a.previewStale = false
+			a.preview.SetSource(a.text())
+		}
 		body.Child(el.Div().Grow().HFull().ScrollY().P(24).Child(a.preview.Render(cx)))
 	default:
 		body.Child(a.column(cx))
@@ -786,51 +810,59 @@ func taskBox(checked bool) el.Element {
 	return box.Border(1, pal.Primary).Child(el.Text("✓").TextSize(10).TextColor(pal.Primary))
 }
 
-// activeEditor draws the block under the caret at its own height.
+// activeEditor draws the block under the caret. The height follows the text
+// until maxEditorHeight: keel draws every line of its buffer each frame, and a
+// block past a few hundred lines costs tens of milliseconds, so a long block
+// scrolls inside a bounded box instead of stretching the page.
 func (a *app) activeEditor(cx *el.Context) el.Element {
-	lines := strings.Count(a.buffer(), "\n") + 1
-	height := float32(lines*lineHeight + 24)
-	return el.Div().WFull().Child(a.editor.Height(height).Render(cx))
+	return el.Div().WFull().Child(a.editor.Height(a.editorHeight()).Render(cx))
 }
 
-// widenSelection turns a fully selected block into the whole document, so the
-// next Ctrl+A selects every block. kit.CodeEditor cannot be handed a selection
-// but it does select its whole buffer, and there the buffer is one block. The
-// comparison keeps the guards: a select-all covers them, and an empty block
-// (guards only) is told apart from no selection at all, which is "".
+// editorHeight follows the active block up to the bound, where the editor
+// scrolls inside its own box instead of stretching the page.
+func (a *app) editorHeight() float32 {
+	lines := strings.Count(a.buffer(), "\n") + 1
+	height := float32(lines*lineHeight + 24)
+	if height > maxEditorHeight {
+		return maxEditorHeight
+	}
+	return height
+}
+
+// widenSelection marks the whole document once the active block is fully
+// selected, so the second Ctrl+A reaches every block. kit.CodeEditor cannot be
+// handed a selection, and putting the file into one buffer to reuse its
+// select-all costs tens of milliseconds per frame on a long document, so the
+// document stays split and this only marks it as picked.
 func (a *app) widenSelection() {
-	if a.wholeDoc || a.sourceMode || a.previewing || a.active < 0 || len(a.blocks) < 2 {
+	if a.allSelected || a.sourceMode || a.previewing || a.active < 0 || len(a.blocks) < 2 {
 		return
 	}
 	if a.editor.Selection() != a.editor.Value() {
 		return
 	}
 	// The body is already built, so the editor has drawn and taken the key; the
-	// document swap shows up on the next frame.
-	a.wholeDocument()
+	// status bar shows the change on the next frame.
+	a.allSelected = true
+	a.status = "整篇已选中，输入即替换"
+	a.statusColor = nil
 }
 
-// wholeDocument puts every block into one editor buffer, so kit.CodeEditor's
-// own select-all covers the file.
-func (a *app) wholeDocument() {
-	if a.wholeDoc || a.sourceMode || a.previewing || a.active < 0 || len(a.blocks) < 2 {
+// replaceDocument makes typed the whole document, which is what the next edit
+// means while Ctrl+A has the document selected.
+func (a *app) replaceDocument(typed string) {
+	a.splitting = true
+	a.doc = typed
+	a.split(typed)
+	a.splitting = false
+	if len(a.blocks) == 0 {
+		a.appendBlock()
 		return
 	}
-	value := a.buffer()
-	at := a.caret()
-	at.Line += strings.Count(a.before, "\n")
-	a.wholeDoc = true
-	a.splitting = true
-	a.doc = a.before + value + a.after
-	a.before, a.after = "", ""
-	a.blocks = []mddoc.Block{{Start: 0, End: len(a.doc)}}
-	a.docs = make([]*markdown.Doc, 1)
-	a.active = 0
-	a.setBuffer(a.doc, at)
-	a.lastValue = a.editor.Value()
-	a.splitting = false
-	a.pending = true
-	a.editor.Focus()
+	a.activate(0)
+	first := a.blocks[0].Text(a.doc)
+	a.setBuffer(first, mddoc.PosOf(first, len(first)))
+	a.touch(a.editor.Value())
 }
 
 // title is the path shown at the left of the status bar.
@@ -930,6 +962,9 @@ func (a *app) toggleTree() {
 // source code mode does, and returns to blocks afterwards.
 func (a *app) toggleSource() {
 	a.commit()
+	// One buffer for the whole file costs tens of milliseconds per frame once
+	// it passes about a thousand lines, measured with go test -bench, so source
+	// mode stops there instead of turning typing sluggish.
 	a.sourceMode = !a.sourceMode
 	if a.sourceMode {
 		a.blocks = []mddoc.Block{{Start: 0, End: len(a.doc)}}
