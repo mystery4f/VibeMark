@@ -1,0 +1,9 @@
+# Audit & acceptance stage preferences (design-playbook ADR-0033).
+# VibeMark is a native Gio desktop app driven by keel, not a web UI.
+# observe and ui_evaluator both need Playwright screenshot evidence from a
+# browser page; there is no such surface here, so they stay off until a
+# capture path for native windows exists. craft_guard is rule-based and works.
+craft_guard: true
+observe: false
+ui_evaluator: false
+asked: true
