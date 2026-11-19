@@ -1,0 +1,16 @@
+{
+  "name": "VibeMark",
+  "appid": "com.mystery4f.vibemark",
+  "version": "0.1.0",
+  "build": 1,
+  "binary": "vibemark",
+  "icon": "appicon.png",
+  "main": ".",
+  "ios": {
+    "minimum_version": "18.0"
+  },
+  "android": {
+    "minimum_sdk": 23,
+    "target_sdk": 35
+  }
+}
