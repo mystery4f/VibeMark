@@ -1,0 +1,7 @@
+# ~/.gitignore_global ignores docs/ (pattern on line 17). Repo-level patterns win,
+# so re-include it here — otherwise design docs under docs/ silently never appear
+# in git status. Verified with: git check-ignore --no-index docs/design/*.md
+!docs/
+
+# Scratch space for staged downloads and QA renders (AGENTS.md: temp files live here).
+/.tmp/

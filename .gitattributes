@@ -1,0 +1,7 @@
+# Keep LF in the repository and in the working tree: .editorconfig declares lf,
+# while the global gitconfig sets core.autocrlf=true (see repo-local override).
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.jpg binary
