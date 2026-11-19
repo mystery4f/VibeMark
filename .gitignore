@@ -5,3 +5,7 @@
 
 # Scratch space for staged downloads and QA renders (AGENTS.md: temp files live here).
 /.tmp/
+
+# ~/.gitignore_global:48 ignores GLOSSARY.md alongside CHANGELOG.md and .scratch/.
+# The glossary is a design artifact here, not AI clutter: re-include this one file.
+!GLOSSARY.md
