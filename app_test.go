@@ -140,3 +140,24 @@ func TestCommittingABlockWritesBack(t *testing.T) {
 		t.Fatalf("file = %q, want %q", onDisk, want)
 	}
 }
+
+// An empty working directory is not a dead end: Ctrl+N creates a file there and
+// opens it, and a second press does not overwrite the first one.
+func TestNewFileFillsAnEmptyDirectory(t *testing.T) {
+	dir := t.TempDir()
+	a := newApp("", dir)
+	app := windowtest.New(t, window.Options{Content: el.Root(a), KeepState: &a.state, Shortcuts: a.shortcuts()})
+	app.Want("这个目录里还没有 Markdown 文件")
+
+	app.Press("ctrl+n")
+	app.Want("untitled.md")
+
+	app.Press("ctrl+n")
+	app.Want("untitled-2.md")
+
+	for _, name := range []string{"untitled.md", "untitled-2.md"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}

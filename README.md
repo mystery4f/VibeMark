@@ -37,6 +37,7 @@ open or write (message on stderr).
 | `Ctrl+S` | Save |
 | `Esc` | Commit the active block |
 | `Ctrl+P` | Toggle the full-screen preview |
+| `Ctrl+N` | New `untitled.md` in the working directory (workspace mode) |
 | `Ctrl+B` / `Ctrl+I` / `Ctrl+E` | Bold / italic / inline code around the selection |
 | `Ctrl+K` | Wrap the selection as a link |
 | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | Heading level 1 / 2 / 3 |

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image/color"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -173,6 +174,37 @@ func (a *app) loadDir() {
 	}
 }
 
+// newFile creates an untitled markdown file in the working directory and opens
+// it. Without this an empty directory is a dead end: there is no row to click
+// and no file to save into.
+func (a *app) newFile() {
+	if a.mode != modeWorkspace || a.dir == "" {
+		return
+	}
+	path := ""
+	for i := 1; i <= 100; i++ {
+		name := "untitled.md"
+		if i > 1 {
+			name = fmt.Sprintf("untitled-%d.md", i)
+		}
+		candidate := filepath.Join(a.dir, name)
+		if _, err := os.Stat(candidate); errors.Is(err, fs.ErrNotExist) {
+			path = candidate
+			break
+		}
+	}
+	if path == "" {
+		a.fail(userError("新建", "untitled.md", errors.New("文件名都被占用了")))
+		return
+	}
+	if err := workspace.Ensure(path); err != nil {
+		a.fail(userError("新建", filepath.Base(path), err))
+		return
+	}
+	a.loadDir()
+	a.open(path)
+}
+
 // open switches the window to the file the tree selected, saving pending edits
 // of the current one first.
 func (a *app) open(path string) {
@@ -339,8 +371,10 @@ func (a *app) Render(cx *el.Context) el.Element {
 	}
 	switch {
 	case a.mode == modeWorkspace && a.path == "":
-		body.Child(el.Div().Grow().HFull().P(24).Items(el.Start).Justify(el.Start).
-			Child(el.Text(emptyHint).TextColor(pal.Muted)))
+		body.Child(el.Div().Grow().HFull().P(24).Gap(8).Items(el.Start).Justify(el.Start).
+			Child(el.Text(emptyHint).TextColor(pal.Muted)).
+			Child(el.Div().P(8).OnClick(a.newFile).
+				Child(el.Text("点这里新建一篇，或者按 Ctrl+N").TextColor(pal.Primary))))
 	case a.previewing:
 		a.preview.SetSource(a.text())
 		body.Child(el.Div().Grow().HFull().ScrollY().P(24).Child(a.preview.Render(cx)))
@@ -439,6 +473,7 @@ func (a *app) shortcuts() map[string]func() {
 		"ctrl+k":               func() { a.wrap("[", "](url)") },
 		"ctrl+s":               a.save,
 		"ctrl+p":               func() { a.commit(); a.previewing = !a.previewing },
+		"ctrl+n":               a.newFile,
 		"esc":                  a.commit,
 		"ctrl+1":               func() { a.prefix("# ") },
 		"ctrl+2":               func() { a.prefix("## ") },

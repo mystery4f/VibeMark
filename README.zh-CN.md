@@ -34,6 +34,7 @@ keel 的装饰既不能隐藏字符也不能改字宽，所以真 WYSIWYG 只能
 | `Ctrl+S` | 保存 |
 | `Esc` | 提交当前正在编辑的块 |
 | `Ctrl+P` | 全屏预览开关 |
+| `Ctrl+N` | 在工作目录里新建 `untitled.md`（仅工作目录模式） |
 | `Ctrl+B` / `Ctrl+I` / `Ctrl+E` | 选区加粗 / 斜体 / 行内代码 |
 | `Ctrl+K` | 选区包成链接 |
 | `Ctrl+1` / `Ctrl+2` / `Ctrl+3` | 一级 / 二级 / 三级标题 |
